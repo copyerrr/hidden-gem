@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>히든젬 — 관광지 추천</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="app">
+    <header class="top-bar">
+      <nav class="tabs" role="tablist">
+        <button type="button" class="tab active" data-tab="ai" role="tab" aria-selected="true">AI 추천</button>
+        <button type="button" class="tab" data-tab="domestic" role="tab" aria-selected="false">내국인 추천</button>
+        <button type="button" class="tab" data-tab="foreign" role="tab" aria-selected="false">외국인 추천</button>
+      </nav>
+    </header>
+
+    <!-- AI 추천 패널 -->
+    <section id="panel-ai" class="panel active" role="tabpanel">
+      <div class="panel-toolbar">
+        <div class="sort-wrap">
+          <label for="sort">정렬</label>
+          <select id="sort">
+            <option value="gem">추천순</option>
+            <option value="foreign">외국인 많은 순</option>
+            <option value="domestic">내국인 많은 순</option>
+          </select>
+        </div>
+      </div>
+
+      <div id="status" class="status" hidden></div>
+      <ul id="results" class="post-list"></ul>
+    </section>
+
+    <!-- 내국인 추천 (준비 중) -->
+    <section id="panel-domestic" class="panel" role="tabpanel" hidden>
+      <div class="panel-toolbar">
+        <div class="sort-wrap">
+          <label for="sortDomestic">정렬</label>
+          <select id="sortDomestic" disabled>
+            <option>추천순</option>
+          </select>
+        </div>
+      </div>
+      <div class="empty-state">
+        <p>내국인 추천 게시글이 곧 올라옵니다.</p>
+      </div>
+    </section>
+
+    <!-- 외국인 추천 (준비 중) -->
+    <section id="panel-foreign" class="panel" role="tabpanel" hidden>
+      <div class="panel-toolbar">
+        <div class="sort-wrap">
+          <label for="sortForeign">정렬</label>
+          <select id="sortForeign" disabled>
+            <option>추천순</option>
+          </select>
+        </div>
+      </div>
+      <div class="empty-state">
+        <p>외국인 추천 게시글이 곧 올라옵니다.</p>
+      </div>
+    </section>
+
+    <button type="button" id="writeBtn" class="fab" title="글쓰기">글쓰기</button>
+
+    <footer class="footer">
+      <p>데이터: 한국문화관광연구원 관광자원통계서비스</p>
+    </footer>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

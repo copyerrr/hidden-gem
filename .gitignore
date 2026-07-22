@@ -1,0 +1,18 @@
+# secrets
+db.properties
+
+# build / deps
+build/
+lib/
+*.class
+*.jar
+
+# API dump / local outputs
+out/
+
+# IDE / OS
+.vscode/
+.idea/
+*.iml
+.DS_Store
+Thumbs.db
