@@ -38,8 +38,10 @@ import org.w3c.dom.NodeList;
  * 웹 UI + REST API — 외국인 대비 내국인 방문 순위가 낮은 유료관광지(히든젬) 탐색.
  * <p>
  * 데이터: openapi.tour.go.kr 유료관광지방문객수조회
- * 실행: {@code javac HiddenGemServer.java && java HiddenGemServer}
+ * 실행: {@code start.bat} 또는 {@code start.sh}
  * 브라우저: {@code http://localhost:8080}
+ * <p>
+ * 게시판 DB: {@code /api/login}, {@code /api/posts} (Post / Reply / Recommendation / Location)
  */
 public class HiddenGemServer {
 
@@ -51,6 +53,9 @@ public class HiddenGemServer {
     private static final Map<String, String> GEM_CACHE = new HashMap<>();
     private static final Map<String, List<Attraction>> YM_DATA_CACHE = new HashMap<>();
     private static final Map<String, String> IMAGE_CACHE = new ConcurrentHashMap<>();
+    /** 한 번에 전체 1260건을 받으면 Read timed out 나므로 페이지 단위로 받음 */
+    private static final int API_PAGE_SIZE = 100;
+    private static final Path CACHE_DIR = Path.of("out");
 
     public static void main(String[] args) throws Exception {
         if (!Files.isDirectory(WEB_ROOT)) {
@@ -63,10 +68,19 @@ public class HiddenGemServer {
         server.createContext("/api/hidden-gems", HiddenGemServer::handleHiddenGems);
         server.createContext("/api/thumbnails", HiddenGemServer::handleThumbnails);
         server.createContext("/api/regions", HiddenGemServer::handleRegions);
+        server.createContext("/api/login", BoardApi::handleLogin);
+        server.createContext("/api/posts", BoardApi::handlePosts);
         server.setExecutor(Executors.newFixedThreadPool(8));
         server.start();
 
         System.out.println("히든젬 서버 시작 → http://localhost:" + PORT);
+        try {
+            try (var ignored = BoardDb.open()) {
+                System.out.println("DB 연결 OK (게시판 API 활성)");
+            }
+        } catch (Exception e) {
+            System.err.println("DB 연결 실패 — 게시판 API는 오류를 반환합니다: " + e.getMessage());
+        }
         warmCacheAsync();
     }
 
@@ -255,8 +269,15 @@ public class HiddenGemServer {
         if (cached != null) {
             return cached;
         }
+        List<Attraction> fromDisk = readYmDiskCache(ym);
+        if (fromDisk != null && !fromDisk.isEmpty()) {
+            System.out.println("캐시 사용: " + ymDiskCachePath(ym) + " (" + fromDisk.size() + "건)");
+            YM_DATA_CACHE.put(ym, fromDisk);
+            return fromDisk;
+        }
         List<Attraction> list = fetchAllFromApi(ym);
         YM_DATA_CACHE.put(ym, list);
+        writeYmDiskCache(ym, list);
         return list;
     }
 
@@ -282,13 +303,94 @@ public class HiddenGemServer {
         Document doc = parseXml(xml);
         checkResult(doc);
         int total = parseInt(text(doc, "totalCount"), 0);
-        if (total <= 1) {
+        if (total <= 0) {
+            return List.of();
+        }
+        if (total <= API_PAGE_SIZE) {
+            if (total <= 1) {
+                return parseAttractions(doc);
+            }
+            xml = fetchPaidVisitorXml(ym, "", "", 1, total);
+            doc = parseXml(xml);
+            checkResult(doc);
             return parseAttractions(doc);
         }
-        xml = fetchPaidVisitorXml(ym, "", "", 1, total);
-        doc = parseXml(xml);
-        checkResult(doc);
-        return parseAttractions(doc);
+
+        List<Attraction> all = new ArrayList<>(total);
+        int pages = (total + API_PAGE_SIZE - 1) / API_PAGE_SIZE;
+        for (int pageNo = 1; pageNo <= pages; pageNo++) {
+            xml = fetchPaidVisitorXml(ym, "", "", pageNo, API_PAGE_SIZE);
+            doc = parseXml(xml);
+            checkResult(doc);
+            List<Attraction> page = parseAttractions(doc);
+            all.addAll(page);
+            System.out.println("API 로딩 " + pageNo + "/" + pages
+                    + " (" + all.size() + "/" + total + "건)");
+            if (page.isEmpty()) {
+                break;
+            }
+        }
+        return all;
+    }
+
+    private static Path ymDiskCachePath(String ym) {
+        return CACHE_DIR.resolve("ym-" + ym + ".tsv");
+    }
+
+    private static List<Attraction> readYmDiskCache(String ym) {
+        Path path = ymDiskCachePath(ym);
+        if (!Files.isRegularFile(path)) {
+            return null;
+        }
+        try {
+            List<String> lines = Files.readAllLines(path, StandardCharsets.UTF_8);
+            List<Attraction> list = new ArrayList<>();
+            for (String line : lines) {
+                if (line.isBlank() || line.startsWith("#")) {
+                    continue;
+                }
+                String[] p = line.split("\t", -1);
+                if (p.length < 7) {
+                    continue;
+                }
+                list.add(new Attraction(
+                        p[0], p[1], p[2], p[3], p[4],
+                        parseDouble(p[5]), parseDouble(p[6])));
+            }
+            return list;
+        } catch (Exception e) {
+            System.err.println("캐시 읽기 실패(무시): " + e.getMessage());
+            return null;
+        }
+    }
+
+    private static void writeYmDiskCache(String ym, List<Attraction> list) {
+        try {
+            Files.createDirectories(CACHE_DIR);
+            Path path = ymDiskCachePath(ym);
+            StringBuilder sb = new StringBuilder();
+            sb.append("# ym=").append(ym).append(" count=").append(list.size()).append('\n');
+            for (Attraction a : list) {
+                sb.append(escTab(a.resNm)).append('\t')
+                        .append(escTab(a.sido)).append('\t')
+                        .append(escTab(a.gungu)).append('\t')
+                        .append(escTab(a.addrCd)).append('\t')
+                        .append(escTab(a.ym)).append('\t')
+                        .append(a.domestic).append('\t')
+                        .append(a.foreign).append('\n');
+            }
+            Files.writeString(path, sb.toString(), StandardCharsets.UTF_8);
+            System.out.println("캐시 저장: " + path + " (" + list.size() + "건)");
+        } catch (Exception e) {
+            System.err.println("캐시 저장 실패(무시): " + e.getMessage());
+        }
+    }
+
+    private static String escTab(String s) {
+        if (s == null) {
+            return "";
+        }
+        return s.replace('\t', ' ').replace('\n', ' ').replace('\r', ' ');
     }
 
     private static List<Attraction> parseAttractions(Document doc) {
@@ -525,7 +627,7 @@ public class HiddenGemServer {
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
         conn.setRequestMethod("GET");
         conn.setConnectTimeout(20_000);
-        conn.setReadTimeout(45_000);
+        conn.setReadTimeout(90_000);
         conn.setRequestProperty("Accept", "application/xml, application/json, */*");
         conn.setRequestProperty("User-Agent", "HiddenGem/1.0");
 

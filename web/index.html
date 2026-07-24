@@ -36,42 +36,64 @@
       <ul id="results" class="post-list"></ul>
     </section>
 
-    <!-- 내국인 추천 (준비 중) -->
+    <!-- 내국인 추천 = DB Post 목록 -->
     <section id="panel-domestic" class="panel" role="tabpanel" hidden>
       <div class="panel-toolbar">
-        <div class="sort-wrap">
-          <label for="sortDomestic">정렬</label>
-          <select id="sortDomestic" disabled>
-            <option>추천순</option>
-          </select>
-        </div>
+        <p class="panel-hint">커뮤니티 게시글</p>
       </div>
-      <div class="empty-state">
-        <p>내국인 추천 게시글이 곧 올라옵니다.</p>
-      </div>
+      <div id="boardStatusDomestic" class="status" hidden></div>
+      <ul id="boardListDomestic" class="post-list"></ul>
     </section>
 
-    <!-- 외국인 추천 (준비 중) -->
+    <!-- 외국인 추천 = 동일 DB Post 목록 -->
     <section id="panel-foreign" class="panel" role="tabpanel" hidden>
       <div class="panel-toolbar">
-        <div class="sort-wrap">
-          <label for="sortForeign">정렬</label>
-          <select id="sortForeign" disabled>
-            <option>추천순</option>
-          </select>
-        </div>
+        <p class="panel-hint">커뮤니티 게시글</p>
       </div>
-      <div class="empty-state">
-        <p>외국인 추천 게시글이 곧 올라옵니다.</p>
-      </div>
+      <div id="boardStatusForeign" class="status" hidden></div>
+      <ul id="boardListForeign" class="post-list"></ul>
     </section>
 
     <button type="button" id="writeBtn" class="fab" title="글쓰기">글쓰기</button>
 
     <footer class="footer">
-      <p>데이터: 한국문화관광연구원 관광자원통계서비스</p>
+      <p>데이터: 한국문화관광연구원 관광자원통계서비스 · 게시판: MySQL</p>
     </footer>
   </div>
+
+  <!-- 글쓰기 -->
+  <dialog id="writeDialog" class="modal">
+    <form method="dialog" id="writeForm" class="modal-card">
+      <h2>글쓰기</h2>
+      <label>장소명<input id="writeLocation" name="locationTitle" placeholder="예: 부산시립미술관"></label>
+      <label>주소<input id="writeAddress" name="address" placeholder="선택"></label>
+      <label>내용<textarea id="writeContent" name="content" rows="5" required placeholder="방문 후기나 추천 이유를 적어 주세요."></textarea></label>
+      <p id="writeError" class="form-error" hidden></p>
+      <div class="modal-actions">
+        <button type="submit" value="cancel" class="btn-ghost">취소</button>
+        <button type="submit" value="ok" class="btn-primary" id="writeSubmit">등록</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- 게시글 상세 (추천·댓글) -->
+  <dialog id="detailDialog" class="modal">
+    <div class="modal-card detail-card">
+      <button type="button" class="modal-close" id="detailClose" aria-label="닫기">×</button>
+      <div id="detailBody"></div>
+      <div class="detail-actions">
+        <button type="button" id="recommendBtn" class="btn-primary">추천</button>
+      </div>
+      <section class="replies">
+        <h3>댓글</h3>
+        <ul id="replyList" class="reply-list"></ul>
+        <form id="replyForm" class="reply-form">
+          <input id="replyInput" type="text" placeholder="댓글을 입력하세요" required>
+          <button type="submit" class="btn-primary">등록</button>
+        </form>
+      </section>
+    </div>
+  </dialog>
 
   <script src="/app.js"></script>
 </body>
