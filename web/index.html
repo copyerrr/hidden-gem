@@ -6,7 +6,7 @@
   <title>히든젬 — 관광지 추천</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -92,6 +92,16 @@
           <button type="submit" class="btn-primary">등록</button>
         </form>
       </section>
+    </div>
+  </dialog>
+
+  <!-- 관광지 상세 (설명·이용·근처) -->
+  <dialog id="placeDialog" class="modal place-modal">
+    <div class="place-sheet">
+      <button type="button" class="modal-close place-close" id="placeClose" aria-label="닫기">×</button>
+      <div id="placeBody" class="place-body">
+        <div class="place-loading">불러오는 중…</div>
+      </div>
     </div>
   </dialog>
 

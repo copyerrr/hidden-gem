@@ -16,13 +16,16 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Pattern;
 
 import javax.xml.parsers.DocumentBuilderFactory;
 
@@ -35,7 +38,10 @@ import org.w3c.dom.Node;
 import org.w3c.dom.NodeList;
 
 /**
- * 웹 UI + REST API — 외국인 대비 내국인 방문 순위가 낮은 유료관광지(히든젬) 탐색.
+ * 웹 UI + REST API — 외국인에게 상대적으로 알려졌지만 내국인에게는 덜 알려진 유료관광지(히든젬) 탐색.
+ * <p>
+ * 점수: {@code ln(1+foreign) × (domesticRank − foreignRank)}<br>
+ * 필터: 숙박·레저 키워드 제외, foreign≥100, domesticRank&gt;50, foreignRank&gt;15
  * <p>
  * 데이터: openapi.tour.go.kr 유료관광지방문객수조회
  * 실행: {@code start.bat} 또는 {@code start.sh}
@@ -47,12 +53,43 @@ public class HiddenGemServer {
 
     private static final int PORT = 8080;
     private static final Path WEB_ROOT = Path.of("web");
+    /** 표본이 너무 적은 곳 제외 */
+    private static final double MIN_FOREIGN_VISITORS = 100;
+    /** 내국인에게 이미 유명한 곳 제외 (순위 1=최다) */
+    private static final int MIN_DOMESTIC_RANK = 50;
+    /** 외국인 메가 관광지 제외 */
+    private static final int MIN_FOREIGN_RANK = 15;
+    private static final Pattern BLOCKED_NAME = Pattern.compile(
+            "리조트|호텔|워터파크|케리비안|스키장|골프|콘도|모텔|펜션|스파플러스|한솔오크|플레이도시|카지노");
+    /**
+     * TourAPI 검색용 별칭. key는 {@link #compactName(String)} 기준.
+     * 통계 명칭 ↔ 관광정보 명칭이 다른 경우 (복수 후보 가능).
+     */
+    private static final Map<String, List<String>> THUMB_ALIASES = Map.ofEntries(
+            Map.entry("우방타워랜드", List.of("이월드")),
+            Map.entry("트릭아이미술관", List.of("트릭아트", "트릭아이")),
+            Map.entry("트릭아이", List.of("트릭아트")),
+            Map.entry("선비문화수련원", List.of("한국선비문화수련원", "선비촌")),
+            Map.entry("해녀박물관", List.of("제주해녀박물관", "해녀박물관")),
+            Map.entry("노보텔부산", List.of("노보텔 부산", "노보텔 앰배서더 부산")),
+            Map.entry("헌릉인릉", List.of("헌릉", "인릉")),
+            Map.entry("용인대장금파크", List.of("대장금파크", "용인 대장금파크")),
+            Map.entry("대장금파크", List.of("대장금파크", "용인 대장금파크")),
+            Map.entry("구리시고구려대장간마을", List.of("고구려대장간마을")),
+            Map.entry("고구려대장간마을", List.of("고구려대장간마을")),
+            Map.entry("태릉강릉조선왕릉전시관", List.of("태릉", "강릉", "조선왕릉")),
+            Map.entry("한국전통음식문화체험관", List.of("정강원", "한국전통음식문화체험관")),
+            Map.entry("카트랜드", List.of("카트체험", "파주카트")),
+            Map.entry("골드힐카운티", List.of("골드힐")),
+            Map.entry("설악파크", List.of("설악파크")),
+            Map.entry("달곁에별", List.of("달곁에별")));
     private static final String PAID_VISITOR_URL =
             "http://openapi.tour.go.kr/openapi/service/TourismResourceStatsService/getPchrgTrrsrtVisitorList";
     private static final String KOR_SERVICE_BASE = "https://apis.data.go.kr/B551011/KorService2";
     private static final Map<String, String> GEM_CACHE = new HashMap<>();
     private static final Map<String, List<Attraction>> YM_DATA_CACHE = new HashMap<>();
     private static final Map<String, String> IMAGE_CACHE = new ConcurrentHashMap<>();
+    private static final Map<String, String> PLACE_DETAIL_CACHE = new ConcurrentHashMap<>();
     /** 한 번에 전체 1260건을 받으면 Read timed out 나므로 페이지 단위로 받음 */
     private static final int API_PAGE_SIZE = 100;
     private static final Path CACHE_DIR = Path.of("out");
@@ -67,6 +104,7 @@ public class HiddenGemServer {
         server.createContext("/", HiddenGemServer::handleStatic);
         server.createContext("/api/hidden-gems", HiddenGemServer::handleHiddenGems);
         server.createContext("/api/thumbnails", HiddenGemServer::handleThumbnails);
+        server.createContext("/api/place-detail", HiddenGemServer::handlePlaceDetail);
         server.createContext("/api/regions", HiddenGemServer::handleRegions);
         server.createContext("/api/login", BoardApi::handleLogin);
         server.createContext("/api/posts", BoardApi::handlePosts);
@@ -126,6 +164,33 @@ public class HiddenGemServer {
             respond(ex, 200, "application/json; charset=utf-8", json.getBytes(StandardCharsets.UTF_8));
         } catch (Exception e) {
             respond(ex, 502, "application/json; charset=utf-8", jsonError(e.getMessage()).getBytes(StandardCharsets.UTF_8));
+        }
+    }
+
+    private static void handlePlaceDetail(HttpExchange ex) throws IOException {
+        if (!"GET".equalsIgnoreCase(ex.getRequestMethod())) {
+            respond(ex, 405, "application/json; charset=utf-8", jsonError("GET only").getBytes(StandardCharsets.UTF_8));
+            return;
+        }
+        try {
+            Map<String, String> qmap = query(ex.getRequestURI());
+            String resNm = qmap.getOrDefault("resNm", "").trim();
+            String sido = qmap.getOrDefault("sido", "").trim();
+            if (resNm.isBlank()) {
+                respond(ex, 400, "application/json; charset=utf-8",
+                        jsonError("resNm required").getBytes(StandardCharsets.UTF_8));
+                return;
+            }
+            String cacheKey = resNm + "|" + sido;
+            String body = PLACE_DETAIL_CACHE.get(cacheKey);
+            if (body == null) {
+                body = buildPlaceDetailJson(resNm, sido);
+                PLACE_DETAIL_CACHE.put(cacheKey, body);
+            }
+            respond(ex, 200, "application/json; charset=utf-8", body.getBytes(StandardCharsets.UTF_8));
+        } catch (Exception e) {
+            respond(ex, 502, "application/json; charset=utf-8",
+                    jsonError(e.getMessage()).getBytes(StandardCharsets.UTF_8));
         }
     }
 
@@ -221,17 +286,28 @@ public class HiddenGemServer {
 
         List<HiddenGem> gems = new ArrayList<>();
         for (Attraction a : attractions) {
-            if (a.foreign <= 0 || a.domestic <= 0) {
+            if (a.foreign < MIN_FOREIGN_VISITORS || a.domestic <= 0) {
+                continue;
+            }
+            if (isBlockedName(a.resNm)) {
+                continue;
+            }
+            int fRank = foreignRank.getOrDefault(a.key(), attractions.size());
+            int dRank = domesticRank.getOrDefault(a.key(), attractions.size());
+            if (dRank <= MIN_DOMESTIC_RANK || fRank <= MIN_FOREIGN_RANK) {
+                continue;
+            }
+            int gap = dRank - fRank;
+            if (gap <= 0) {
                 continue;
             }
             double share = a.foreign / (a.foreign + a.domestic) * 100.0;
-            int fRank = foreignRank.getOrDefault(a.key(), attractions.size());
-            int dRank = domesticRank.getOrDefault(a.key(), attractions.size());
-            gems.add(new HiddenGem(a, share, dRank, fRank, dRank - fRank));
+            double score = Math.log(1.0 + a.foreign) * gap;
+            gems.add(new HiddenGem(a, share, dRank, fRank, score));
         }
-        gems.sort(Comparator.comparingInt((HiddenGem g) -> g.gemScore).reversed()
-                .thenComparingDouble(g -> g.foreignShare).reversed());
-        gems.removeIf(g -> g.gemScore <= 0);
+        gems.sort(Comparator
+                .comparingDouble((HiddenGem g) -> g.gemScore).reversed()
+                .thenComparing(Comparator.comparingDouble((HiddenGem g) -> g.foreignShare).reversed()));
         if (gems.size() > limit) {
             gems = new ArrayList<>(gems.subList(0, limit));
         }
@@ -257,11 +333,15 @@ public class HiddenGemServer {
                     .append(",\"foreignShare\":").append(round(g.foreignShare))
                     .append(",\"domesticRank\":").append(g.domesticRank)
                     .append(",\"foreignRank\":").append(g.foreignRank)
-                    .append(",\"gemScore\":").append(g.gemScore)
+                    .append(",\"gemScore\":").append(round(g.gemScore))
                     .append('}');
         }
         sb.append("]}");
         return sb.toString();
+    }
+
+    private static boolean isBlockedName(String resNm) {
+        return resNm != null && BLOCKED_NAME.matcher(resNm).find();
     }
 
     private static List<Attraction> loadYmData(String ym) throws Exception {
@@ -437,15 +517,362 @@ public class HiddenGemServer {
         return sb.toString();
     }
 
+    private static String buildPlaceDetailJson(String resNm, String sido) throws Exception {
+        SearchHit hit = resolveSearchHit(resNm, sido);
+        if (hit == null || hit.contentId.isBlank()) {
+            return "{\"found\":false,\"resNm\":" + q(resNm) + ",\"sido\":" + q(sido)
+                    + ",\"message\":" + q("관광공사 DB에서 장소를 찾지 못했습니다.") + "}";
+        }
+
+        Map<String, String> common = fetchDetailCommon(hit.contentId);
+        String contentTypeId = firstNonBlank(common.get("contenttypeid"), hit.contentTypeId);
+        Map<String, String> intro = fetchDetailIntro(hit.contentId, contentTypeId);
+
+        String title = firstNonBlank(common.get("title"), hit.title, resNm);
+        String addr = firstNonBlank(common.get("addr1"), hit.addr);
+        String overview = nullToEmpty(common.get("overview"));
+        String homepage = nullToEmpty(common.get("homepage"));
+        String image = firstNonBlank(
+                normalizeImageUrlOrNull(common.get("firstimage")),
+                normalizeImageUrlOrNull(common.get("firstimage2")),
+                hit.image);
+        String mapx = firstNonBlank(common.get("mapx"), hit.mapx);
+        String mapy = firstNonBlank(common.get("mapy"), hit.mapy);
+        String tel = firstNonBlank(intro.get("infocenter"), intro.get("infocenterfood"), common.get("tel"));
+
+        List<String[]> infoRows = new ArrayList<>();
+        addInfoRow(infoRows, "이용시간", firstNonBlank(intro.get("usetime"), intro.get("opentimefood"), intro.get("opentime")));
+        addInfoRow(infoRows, "휴무일", firstNonBlank(intro.get("restdate"), intro.get("restdatefood")));
+        addInfoRow(infoRows, "주차", intro.get("parking"));
+        addInfoRow(infoRows, "문의", tel);
+        addInfoRow(infoRows, "체험안내", intro.get("expguide"));
+        addInfoRow(infoRows, "입장료", firstNonBlank(intro.get("usefee"), intro.get("usagefee")));
+
+        List<NearbyPlace> restaurants = List.of();
+        List<NearbyPlace> attractions = List.of();
+        if (!mapx.isBlank() && !mapy.isBlank()) {
+            restaurants = fetchNearby(mapx, mapy, "39", hit.contentId, 8);
+            attractions = fetchNearby(mapx, mapy, "12", hit.contentId, 8);
+        }
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("{\"found\":true")
+                .append(",\"resNm\":").append(q(resNm))
+                .append(",\"sido\":").append(q(sido))
+                .append(",\"contentId\":").append(q(hit.contentId))
+                .append(",\"contentTypeId\":").append(q(contentTypeId))
+                .append(",\"title\":").append(q(title))
+                .append(",\"addr\":").append(q(addr))
+                .append(",\"overview\":").append(q(overview))
+                .append(",\"homepage\":").append(q(extractHomepage(homepage)))
+                .append(",\"image\":").append(image == null ? "null" : q(image))
+                .append(",\"mapx\":").append(q(mapx))
+                .append(",\"mapy\":").append(q(mapy))
+                .append(",\"tel\":").append(q(nullToEmpty(tel)))
+                .append(",\"info\":[");
+        for (int i = 0; i < infoRows.size(); i++) {
+            if (i > 0) {
+                sb.append(',');
+            }
+            sb.append("{\"label\":").append(q(infoRows.get(i)[0]))
+                    .append(",\"value\":").append(q(infoRows.get(i)[1])).append('}');
+        }
+        sb.append("],\"restaurants\":");
+        appendNearbyJson(sb, restaurants);
+        sb.append(",\"attractions\":");
+        appendNearbyJson(sb, attractions);
+        sb.append('}');
+        return sb.toString();
+    }
+
+    private static void addInfoRow(List<String[]> rows, String label, String value) {
+        if (value == null || value.isBlank()) {
+            return;
+        }
+        String cleaned = stripHtml(value).trim();
+        if (!cleaned.isBlank()) {
+            rows.add(new String[] { label, cleaned });
+        }
+    }
+
+    private static void appendNearbyJson(StringBuilder sb, List<NearbyPlace> list) {
+        sb.append('[');
+        for (int i = 0; i < list.size(); i++) {
+            if (i > 0) {
+                sb.append(',');
+            }
+            NearbyPlace p = list.get(i);
+            sb.append("{\"title\":").append(q(p.title))
+                    .append(",\"addr\":").append(q(p.addr))
+                    .append(",\"image\":").append(p.image == null ? "null" : q(p.image))
+                    .append(",\"dist\":").append(round(p.dist))
+                    .append(",\"contentId\":").append(q(p.contentId))
+                    .append('}');
+        }
+        sb.append(']');
+    }
+
+    private static SearchHit resolveSearchHit(String resNm, String sido) {
+        for (String keyword : thumbnailSearchKeywords(resNm)) {
+            try {
+                String xml = korSearchKeyword(keyword);
+                Document doc = parseXml(xml);
+                checkResult(doc);
+                SearchHit hit = pickSearchHit(doc, resNm, keyword, sido);
+                if (hit != null) {
+                    return hit;
+                }
+            } catch (Exception ignored) {
+                // next keyword
+            }
+        }
+        return null;
+    }
+
+    private static SearchHit pickSearchHit(Document doc, String originalName, String keyword, String sido) {
+        NodeList items = doc.getElementsByTagName("item");
+        SearchHit nameMatch = null;
+        SearchHit any = null;
+        String sidoShort = shortenSido(sido);
+
+        for (int i = 0; i < items.getLength(); i++) {
+            Element item = (Element) items.item(i);
+            String contentId = childText(item, "contentid");
+            if (contentId.isBlank()) {
+                continue;
+            }
+            String title = childText(item, "title");
+            String addr1 = childText(item, "addr1");
+            String mapx = childText(item, "mapx");
+            String mapy = childText(item, "mapy");
+            String img = imageFromItem(item);
+            SearchHit hit = new SearchHit(
+                    contentId,
+                    childText(item, "contenttypeid"),
+                    title,
+                    addr1,
+                    mapx,
+                    mapy,
+                    img);
+
+            boolean regionOk = sido.isBlank()
+                    || addr1.contains(sido)
+                    || (!sidoShort.isBlank() && addr1.contains(sidoShort));
+            boolean nameOk = namesMatch(title, originalName) || namesMatch(title, keyword);
+
+            if (any == null) {
+                any = hit;
+            }
+            if (nameOk && regionOk) {
+                return hit;
+            }
+            if (nameOk && nameMatch == null) {
+                nameMatch = hit;
+            }
+        }
+        return nameMatch != null ? nameMatch : any;
+    }
+
+    private static Map<String, String> fetchDetailCommon(String contentId) throws Exception {
+        StringBuilder url = new StringBuilder(KOR_SERVICE_BASE).append("/detailCommon2?");
+        url.append("serviceKey=").append(enc(tourServiceKeyRaw()));
+        url.append("&MobileOS=ETC&MobileApp=HiddenGem&_type=xml");
+        url.append("&contentId=").append(enc(contentId));
+        Document doc = parseXml(httpGet(url.toString()));
+        checkResult(doc);
+        return firstItemFields(doc);
+    }
+
+    private static Map<String, String> fetchDetailIntro(String contentId, String contentTypeId) {
+        if (contentId == null || contentId.isBlank() || contentTypeId == null || contentTypeId.isBlank()) {
+            return Map.of();
+        }
+        try {
+            StringBuilder url = new StringBuilder(KOR_SERVICE_BASE).append("/detailIntro2?");
+            url.append("serviceKey=").append(enc(tourServiceKeyRaw()));
+            url.append("&MobileOS=ETC&MobileApp=HiddenGem&_type=xml");
+            url.append("&contentId=").append(enc(contentId));
+            url.append("&contentTypeId=").append(enc(contentTypeId));
+            Document doc = parseXml(httpGet(url.toString()));
+            checkResult(doc);
+            return firstItemFields(doc);
+        } catch (Exception e) {
+            return Map.of();
+        }
+    }
+
+    private static List<NearbyPlace> fetchNearby(
+            String mapx, String mapy, String contentTypeId, String excludeContentId, int limit) {
+        List<NearbyPlace> out = new ArrayList<>();
+        try {
+            StringBuilder url = new StringBuilder(KOR_SERVICE_BASE).append("/locationBasedList2?");
+            url.append("serviceKey=").append(enc(tourServiceKeyRaw()));
+            url.append("&numOfRows=").append(Math.max(limit * 2, 12));
+            url.append("&pageNo=1&MobileOS=ETC&MobileApp=HiddenGem&_type=xml&arrange=E");
+            url.append("&mapX=").append(enc(mapx));
+            url.append("&mapY=").append(enc(mapy));
+            url.append("&radius=3000");
+            url.append("&contentTypeId=").append(enc(contentTypeId));
+            Document doc = parseXml(httpGet(url.toString()));
+            checkResult(doc);
+            NodeList items = doc.getElementsByTagName("item");
+            for (int i = 0; i < items.getLength() && out.size() < limit; i++) {
+                Element item = (Element) items.item(i);
+                String cid = childText(item, "contentid");
+                if (cid.equals(excludeContentId)) {
+                    continue;
+                }
+                String title = childText(item, "title");
+                if (title.isBlank()) {
+                    continue;
+                }
+                out.add(new NearbyPlace(
+                        title,
+                        childText(item, "addr1"),
+                        imageFromItem(item),
+                        parseDouble(childText(item, "dist")),
+                        cid));
+            }
+        } catch (Exception ignored) {
+            // 근처 정보는 선택
+        }
+        return out;
+    }
+
+    private static Map<String, String> firstItemFields(Document doc) {
+        Map<String, String> map = new LinkedHashMap<>();
+        NodeList items = doc.getElementsByTagName("item");
+        if (items.getLength() == 0) {
+            return map;
+        }
+        Element item = (Element) items.item(0);
+        NodeList children = item.getChildNodes();
+        for (int i = 0; i < children.getLength(); i++) {
+            Node n = children.item(i);
+            if (n.getNodeType() != Node.ELEMENT_NODE) {
+                continue;
+            }
+            String name = n.getNodeName();
+            String val = n.getTextContent() == null ? "" : n.getTextContent().trim();
+            map.put(name, val);
+        }
+        return map;
+    }
+
+    private static String extractHomepage(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return "";
+        }
+        java.util.regex.Matcher m = Pattern.compile("href=[\"']([^\"']+)[\"']", Pattern.CASE_INSENSITIVE)
+                .matcher(raw);
+        if (m.find()) {
+            return m.group(1).trim();
+        }
+        String plain = stripHtml(raw).trim();
+        if (plain.startsWith("http://") || plain.startsWith("https://")) {
+            return plain.split("\\s+")[0];
+        }
+        return plain;
+    }
+
+    private static String stripHtml(String s) {
+        if (s == null || s.isBlank()) {
+            return "";
+        }
+        return s.replaceAll("(?i)<br\\s*/?>", "\n")
+                .replaceAll("<[^>]+>", " ")
+                .replaceAll("&nbsp;", " ")
+                .replaceAll("&amp;", "&")
+                .replaceAll("&lt;", "<")
+                .replaceAll("&gt;", ">")
+                .replaceAll("[ \\t]+", " ")
+                .trim();
+    }
+
+    private static String nullToEmpty(String s) {
+        return s == null ? "" : s;
+    }
+
+    private static String firstNonBlank(String... values) {
+        if (values == null) {
+            return "";
+        }
+        for (String v : values) {
+            if (v != null && !v.isBlank()) {
+                return v.trim();
+            }
+        }
+        return "";
+    }
+
+    private static String normalizeImageUrlOrNull(String url) {
+        if (url == null || url.isBlank()) {
+            return null;
+        }
+        return normalizeImageUrl(url);
+    }
+
+    private static final class SearchHit {
+        final String contentId;
+        final String contentTypeId;
+        final String title;
+        final String addr;
+        final String mapx;
+        final String mapy;
+        final String image;
+
+        SearchHit(String contentId, String contentTypeId, String title, String addr,
+                  String mapx, String mapy, String image) {
+            this.contentId = contentId;
+            this.contentTypeId = contentTypeId;
+            this.title = title;
+            this.addr = addr;
+            this.mapx = mapx;
+            this.mapy = mapy;
+            this.image = image;
+        }
+    }
+
+    private static final class NearbyPlace {
+        final String title;
+        final String addr;
+        final String image;
+        final double dist;
+        final String contentId;
+
+        NearbyPlace(String title, String addr, String image, double dist, String contentId) {
+            this.title = title;
+            this.addr = addr;
+            this.image = image;
+            this.dist = dist;
+            this.contentId = contentId;
+        }
+    }
+
     private static Map<String, String> lookupThumbnailsParallel(List<String[]> items) {
         Map<String, String> result = new ConcurrentHashMap<>();
-        items.parallelStream().forEach(pair -> {
-            String key = imageCacheKey(pair[0], pair[1]);
-            String url = lookupThumbnail(pair[0], pair[1]);
-            if (url != null) {
-                result.put(key, url);
+        ExecutorService pool = Executors.newFixedThreadPool(3);
+        try {
+            List<Future<?>> futures = new ArrayList<>();
+            for (String[] pair : items) {
+                futures.add(pool.submit(() -> {
+                    String key = imageCacheKey(pair[0], pair[1]);
+                    String url = lookupThumbnail(pair[0], pair[1]);
+                    if (url != null) {
+                        result.put(key, url);
+                    }
+                }));
             }
-        });
+            for (Future<?> f : futures) {
+                try {
+                    f.get();
+                } catch (Exception ignored) {
+                    // 개별 실패 무시
+                }
+            }
+        } finally {
+            pool.shutdownNow();
+        }
         return result;
     }
 
@@ -481,19 +908,111 @@ public class HiddenGemServer {
         }
         try {
             String url = lookupThumbnailFromApi(resNm, sido);
-            IMAGE_CACHE.put(cacheKey, url == null ? "" : url);
+            // 성공만 캐시 — 일시적 API 실패를 빈 값으로 고정하지 않음
+            if (url != null) {
+                IMAGE_CACHE.put(cacheKey, url);
+            }
             return url;
         } catch (Exception e) {
-            IMAGE_CACHE.put(cacheKey, "");
             return null;
         }
     }
 
     private static String lookupThumbnailFromApi(String resNm, String sido) throws Exception {
-        String xml = korSearchKeyword(resNm);
+        for (String keyword : thumbnailSearchKeywords(resNm)) {
+            try {
+                String found = searchThumbnail(keyword, resNm, sido);
+                if (found != null) {
+                    return found;
+                }
+            } catch (Exception ignored) {
+                // 다음 후보 키워드 시도
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 검색 폴백: 원본 → 공백제거 → 핵심어(접두 지역명 제거·토큰) → 별칭.
+     */
+    private static List<String> thumbnailSearchKeywords(String resNm) {
+        LinkedHashSet<String> keys = new LinkedHashSet<>();
+        if (resNm == null || resNm.isBlank()) {
+            return List.of();
+        }
+        String trimmed = resNm.trim();
+        keys.add(trimmed);
+
+        String compact = compactName(trimmed);
+        if (!compact.isBlank()) {
+            keys.add(compact);
+        }
+
+        String stripped = stripRegionPrefix(trimmed);
+        if (!stripped.isBlank()) {
+            keys.add(stripped);
+            String strippedCompact = compactName(stripped);
+            if (!strippedCompact.isBlank()) {
+                keys.add(strippedCompact);
+            }
+        }
+
+        for (String token : splitNameTokens(trimmed)) {
+            keys.add(token);
+        }
+
+        // 별칭은 지금까지 모은 키 기준으로 추가
+        List<String> snapshot = new ArrayList<>(keys);
+        for (String key : snapshot) {
+            List<String> aliases = THUMB_ALIASES.get(compactName(key));
+            if (aliases != null) {
+                keys.addAll(aliases);
+            }
+        }
+
+        List<String> out = new ArrayList<>();
+        for (String key : keys) {
+            if (key != null && !key.isBlank() && out.size() < 10) {
+                out.add(key);
+            }
+        }
+        return out;
+    }
+
+    /** 시·군·구·도 등 지역 접두어 제거 */
+    private static String stripRegionPrefix(String name) {
+        String s = name.trim();
+        s = s.replaceFirst("^[가-힣]+(특별자치시|특별시|광역시|특별자치도)\\s*", "");
+        s = s.replaceFirst("^[가-힣]+(시|군|구)\\s+", "");
+        s = s.replaceFirst("^(용인|파주|속초|수원|제주|부산|대구|서울|영주|평창|단양|양구|춘천|강릉|김해|곡성|천안|화성|구리)\\s+", "");
+        return s.trim();
+    }
+
+    private static List<String> splitNameTokens(String name) {
+        List<String> tokens = new ArrayList<>();
+        for (String part : name.split("[·ㆍ,/\\s]+")) {
+            String t = part.trim();
+            if (t.length() < 2 || isWeakToken(t)) {
+                continue;
+            }
+            tokens.add(t);
+        }
+        return tokens;
+    }
+
+    private static boolean isWeakToken(String token) {
+        if (token.matches(".*[시군구]$") && token.length() <= 4) {
+            return true;
+        }
+        return token.equals("관광지") || token.equals("전시관") || token.equals("박물관")
+                || token.equals("공원") || token.equals("타워");
+    }
+
+    private static String searchThumbnail(String keyword, String originalName, String sido) throws Exception {
+        String xml = korSearchKeyword(keyword);
         Document doc = parseXml(xml);
         checkResult(doc);
-        return pickImageFromSearch(doc, resNm, sido);
+        return pickImageFromSearch(doc, originalName, keyword, sido);
     }
 
     private static String korSearchKeyword(String keyword) throws Exception {
@@ -506,7 +1025,8 @@ public class HiddenGemServer {
         return httpGet(url.toString());
     }
 
-    private static String pickImageFromSearch(Document doc, String resNm, String sido) throws Exception {
+    private static String pickImageFromSearch(Document doc, String originalName, String keyword, String sido)
+            throws Exception {
         NodeList items = doc.getElementsByTagName("item");
         String titleMatch = null;
         String anyImage = null;
@@ -527,7 +1047,7 @@ public class HiddenGemServer {
             if (anyImage == null) {
                 anyImage = img;
             }
-            boolean nameMatch = title.equals(resNm) || title.contains(resNm) || resNm.contains(title);
+            boolean nameMatch = namesMatch(title, originalName) || namesMatch(title, keyword);
             boolean regionMatch = sido.isBlank()
                     || addr1.contains(sido)
                     || (!sidoShort.isBlank() && addr1.contains(sidoShort));
@@ -539,6 +1059,27 @@ public class HiddenGemServer {
             }
         }
         return titleMatch != null ? titleMatch : anyImage;
+    }
+
+    /** 띄어쓰기 무시 이름 비교 */
+    private static boolean namesMatch(String a, String b) {
+        if (a == null || b == null || a.isBlank() || b.isBlank()) {
+            return false;
+        }
+        if (a.equals(b) || a.contains(b) || b.contains(a)) {
+            return true;
+        }
+        String ca = compactName(a);
+        String cb = compactName(b);
+        return !ca.isEmpty() && !cb.isEmpty()
+                && (ca.equals(cb) || ca.contains(cb) || cb.contains(ca));
+    }
+
+    private static String compactName(String s) {
+        if (s == null || s.isBlank()) {
+            return "";
+        }
+        return s.replaceAll("[\\s·ㆍ.\\-_/()（）\\[\\]]+", "");
     }
 
     private static String shortenSido(String sido) {
@@ -815,9 +1356,9 @@ public class HiddenGemServer {
         final double foreignShare;
         final int domesticRank;
         final int foreignRank;
-        final int gemScore;
+        final double gemScore;
 
-        HiddenGem(Attraction a, double foreignShare, int domesticRank, int foreignRank, int gemScore) {
+        HiddenGem(Attraction a, double foreignShare, int domesticRank, int foreignRank, double gemScore) {
             this.resNm = a.resNm;
             this.sido = a.sido;
             this.gungu = a.gungu;

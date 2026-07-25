@@ -19,6 +19,9 @@ const recommendBtn = document.getElementById("recommendBtn");
 const replyList = document.getElementById("replyList");
 const replyForm = document.getElementById("replyForm");
 const replyInput = document.getElementById("replyInput");
+const placeDialog = document.getElementById("placeDialog");
+const placeBody = document.getElementById("placeBody");
+const placeClose = document.getElementById("placeClose");
 
 const DEFAULT_YM = "201201";
 const DEFAULT_LIMIT = "30";
@@ -51,6 +54,13 @@ function formatNum(n) {
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
   if (n >= 1_000) return (n / 1_000).toFixed(1) + "K";
   return String(Math.round(n));
+}
+
+function formatDist(m) {
+  if (m == null || Number.isNaN(Number(m))) return "";
+  const n = Number(m);
+  if (n >= 1000) return (n / 1000).toFixed(1) + "km";
+  return Math.round(n) + "m";
 }
 
 function sortGems(gems, sortKey) {
@@ -93,14 +103,14 @@ function renderGems(gems) {
       const location = [gem.sido, gem.gungu].filter(Boolean).join(" ");
       const key = gemKey(gem);
       return `
-        <li class="post-item" data-key="${escapeHtml(key)}">
+        <li class="post-item gem-item" data-key="${escapeHtml(key)}" role="button" tabindex="0">
           <div class="post-thumb" aria-hidden="true">
             ${thumbHtml(gem)}
           </div>
           <div class="post-body">
             <h2 class="post-title">${escapeHtml(gem.resNm)}</h2>
             <p class="post-meta">${escapeHtml(location)} · 외국인 ${formatNum(gem.foreignVisitors)} · 내국인 ${formatNum(gem.domesticVisitors)}</p>
-            <span class="post-badge">히든젬 +${gem.gemScore}</span>
+            <span class="post-badge">히든젬 +${Math.round(gem.gemScore)}</span>
           </div>
         </li>`;
     })
@@ -157,6 +167,152 @@ async function loadHiddenGems() {
     loadThumbnails(currentGems);
   } catch (e) {
     showStatus(statusEl, e.message || "오류가 발생했습니다.", "error");
+  }
+}
+
+async function openPlaceDetail(gem) {
+  placeBody.innerHTML = `<div class="place-loading">관광 정보를 불러오는 중…</div>`;
+  placeDialog.showModal();
+
+  const params = new URLSearchParams({
+    resNm: gem.resNm || "",
+    sido: gem.sido || "",
+  });
+
+  try {
+    const res = await fetch(`/api/place-detail?${params}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "상세 조회 실패");
+    renderPlaceDetail(gem, data);
+  } catch (e) {
+    placeBody.innerHTML = `<div class="place-empty">${escapeHtml(e.message || "불러오지 못했습니다.")}</div>`;
+  }
+}
+
+function nearbyCardsHtml(list) {
+  if (!list || !list.length) {
+    return `<p class="nearby-empty">주변에 표시할 장소가 없습니다.</p>`;
+  }
+  return `<div class="nearby-row">${list
+    .map((p) => {
+      const letter = (p.title || "?").charAt(0);
+      const thumb = p.image
+        ? `<img src="${escapeHtml(p.image)}" alt="" loading="lazy" onerror="this.remove()" />`
+        : `<span>${escapeHtml(letter)}</span>`;
+      return `
+        <article class="nearby-card">
+          <div class="nearby-thumb">${thumb}</div>
+          <div class="nearby-meta">
+            <h4 class="nearby-title">${escapeHtml(p.title || "")}</h4>
+            <p class="nearby-dist">${escapeHtml(formatDist(p.dist))}${p.addr ? " · " + escapeHtml(p.addr) : ""}</p>
+          </div>
+        </article>`;
+    })
+    .join("")}</div>`;
+}
+
+function renderPlaceDetail(gem, data) {
+  const location = [gem.sido, gem.gungu].filter(Boolean).join(" ");
+  const title = data.found ? data.title || gem.resNm : gem.resNm;
+  const letter = (title || "?").charAt(0);
+  const heroImg = data.image || gem.thumbnail;
+
+  if (!data.found) {
+    placeBody.innerHTML = `
+      <div class="place-hero"><div class="place-hero-fallback">${escapeHtml(letter)}</div></div>
+      <div class="place-content">
+        <div>
+          <p class="place-kicker">${escapeHtml(location || "위치 미상")}</p>
+          <h2 class="place-title">${escapeHtml(gem.resNm)}</h2>
+          <div class="place-stats">
+            <span class="place-chip accent">히든젬 +${Math.round(gem.gemScore)}</span>
+            <span class="place-chip">외국인 ${formatNum(gem.foreignVisitors)}</span>
+            <span class="place-chip">내국인 ${formatNum(gem.domesticVisitors)}</span>
+          </div>
+        </div>
+        <p class="nearby-empty">${escapeHtml(data.message || "상세 정보를 찾지 못했습니다.")}</p>
+      </div>`;
+    return;
+  }
+
+  const infoList = (data.info || [])
+    .map(
+      (row) => `
+      <li class="place-info-item">
+        <span class="place-info-label">${escapeHtml(row.label)}</span>
+        <span class="place-info-value">${escapeHtml(row.value)}</span>
+      </li>`
+    )
+    .join("");
+
+  const overview = data.overview || "";
+  const showMore = overview.length > 220;
+  const telRaw = String(data.tel || "").split(/[,\n]/)[0].trim();
+
+  placeBody.innerHTML = `
+    <div class="place-hero">
+      ${
+        heroImg
+          ? `<img src="${escapeHtml(heroImg)}" alt="" data-fallback="${escapeHtml(letter)}" onerror="this.outerHTML='<div class=place-hero-fallback>'+this.dataset.fallback+'</div>'" />`
+          : `<div class="place-hero-fallback">${escapeHtml(letter)}</div>`
+      }
+    </div>
+    <div class="place-content">
+      <header>
+        <p class="place-kicker">${escapeHtml(data.addr || location || "")}</p>
+        <h2 class="place-title">${escapeHtml(title)}</h2>
+        <div class="place-stats">
+          <span class="place-chip accent">히든젬 +${Math.round(gem.gemScore)}</span>
+          <span class="place-chip">외국인 ${formatNum(gem.foreignVisitors)}</span>
+          <span class="place-chip">내국인 ${formatNum(gem.domesticVisitors)}</span>
+        </div>
+      </header>
+
+      <section>
+        <h3 class="place-section-title">소개</h3>
+        ${
+          overview
+            ? `<p class="place-overview" id="placeOverview">${escapeHtml(overview)}</p>
+               ${showMore ? `<button type="button" class="place-more" id="placeMoreBtn">더 보기</button>` : ""}`
+            : `<p class="nearby-empty">소개글이 없습니다.</p>`
+        }
+      </section>
+
+      <section>
+        <h3 class="place-section-title">이용 정보</h3>
+        ${
+          infoList
+            ? `<ul class="place-info-list">${infoList}</ul>`
+            : `<p class="nearby-empty">이용 정보가 없습니다.</p>`
+        }
+        ${
+          data.homepage || data.tel
+            ? `<div class="place-links" style="margin-top:0.7rem">
+                ${data.homepage ? `<a class="place-link" href="${escapeHtml(data.homepage)}" target="_blank" rel="noopener">홈페이지</a>` : ""}
+                ${data.tel ? `<a class="place-link" href="tel:${escapeHtml(telRaw)}">전화</a>` : ""}
+              </div>`
+            : ""
+        }
+      </section>
+
+      <section>
+        <h3 class="place-section-title">근처 맛집</h3>
+        ${nearbyCardsHtml(data.restaurants)}
+      </section>
+
+      <section>
+        <h3 class="place-section-title">근처에 가볼 곳</h3>
+        ${nearbyCardsHtml(data.attractions)}
+      </section>
+    </div>`;
+
+  const moreBtn = document.getElementById("placeMoreBtn");
+  const overviewEl = document.getElementById("placeOverview");
+  if (moreBtn && overviewEl) {
+    moreBtn.addEventListener("click", () => {
+      const open = overviewEl.classList.toggle("expanded");
+      moreBtn.textContent = open ? "접기" : "더 보기";
+    });
   }
 }
 
@@ -330,6 +486,23 @@ writeForm.addEventListener("submit", async (e) => {
 });
 
 detailClose.addEventListener("click", () => detailDialog.close());
+placeClose.addEventListener("click", () => placeDialog.close());
+
+resultsEl.addEventListener("click", (e) => {
+  const li = e.target.closest(".gem-item");
+  if (!li) return;
+  const gem = currentGems.find((g) => gemKey(g) === li.dataset.key);
+  if (gem) openPlaceDetail(gem);
+});
+
+resultsEl.addEventListener("keydown", (e) => {
+  if (e.key !== "Enter" && e.key !== " ") return;
+  const li = e.target.closest(".gem-item");
+  if (!li) return;
+  e.preventDefault();
+  const gem = currentGems.find((g) => gemKey(g) === li.dataset.key);
+  if (gem) openPlaceDetail(gem);
+});
 
 recommendBtn.addEventListener("click", async () => {
   if (!currentDetail) return;
