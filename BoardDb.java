@@ -224,6 +224,133 @@ public final class BoardDb {
         }
     }
 
+    /** 본인 글만 수정. imageUrl이 null이면 기존 사진 유지, 빈 문자열이면 사진 제거 */
+    public static void updatePost(
+            long postId,
+            String memberId,
+            String content,
+            String locationTitle,
+            String address,
+            String category,
+            String imageUrl)
+            throws Exception {
+        if (memberId == null || memberId.isBlank()) {
+            throw new IllegalArgumentException("로그인이 필요합니다.");
+        }
+        if (content == null || content.isBlank()) {
+            throw new IllegalArgumentException("내용을 입력하세요.");
+        }
+        String cat = normalizeCategory(category);
+        try (Connection conn = open()) {
+            conn.setAutoCommit(false);
+            try {
+                ensureMember(conn, memberId);
+                Long locationId = null;
+                try (PreparedStatement ps = conn.prepareStatement(
+                        "SELECT member_id, location_id FROM Post WHERE post_id = ?")) {
+                    ps.setLong(1, postId);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        if (!rs.next()) {
+                            throw new IllegalArgumentException("게시글이 없습니다.");
+                        }
+                        if (!memberId.equals(rs.getString("member_id"))) {
+                            throw new IllegalArgumentException("본인 글만 수정할 수 있습니다.");
+                        }
+                        long loc = rs.getLong("location_id");
+                        if (!rs.wasNull()) {
+                            locationId = loc;
+                        }
+                    }
+                }
+                try (PreparedStatement ps = conn.prepareStatement(
+                        "UPDATE Post SET content = ?, category = ? WHERE post_id = ?")) {
+                    ps.setString(1, content.trim());
+                    ps.setString(2, cat);
+                    ps.setLong(3, postId);
+                    ps.executeUpdate();
+                }
+                if (locationId != null) {
+                    String title = (locationTitle == null || locationTitle.isBlank())
+                            ? "장소 미정" : locationTitle.trim();
+                    String addr = address == null ? "" : address.trim();
+                    if (imageUrl == null) {
+                        try (PreparedStatement ps = conn.prepareStatement(
+                                "UPDATE Location SET title = ?, address = ? WHERE location_id = ?")) {
+                            ps.setString(1, title);
+                            ps.setString(2, addr.isBlank() ? null : addr);
+                            ps.setLong(3, locationId);
+                            ps.executeUpdate();
+                        }
+                    } else {
+                        try (PreparedStatement ps = conn.prepareStatement(
+                                "UPDATE Location SET title = ?, address = ?, image_url = ? WHERE location_id = ?")) {
+                            ps.setString(1, title);
+                            ps.setString(2, addr.isBlank() ? null : addr);
+                            ps.setString(3, imageUrl.isBlank() ? null : imageUrl.trim());
+                            ps.setLong(4, locationId);
+                            ps.executeUpdate();
+                        }
+                    }
+                }
+                conn.commit();
+            } catch (Exception e) {
+                conn.rollback();
+                throw e;
+            } finally {
+                conn.setAutoCommit(true);
+            }
+        }
+    }
+
+    /** 본인 글만 삭제 (댓글·추천 포함) */
+    public static void deletePost(long postId, String memberId) throws Exception {
+        if (memberId == null || memberId.isBlank()) {
+            throw new IllegalArgumentException("로그인이 필요합니다.");
+        }
+        try (Connection conn = open()) {
+            conn.setAutoCommit(false);
+            try {
+                try (PreparedStatement ps = conn.prepareStatement(
+                        "SELECT member_id FROM Post WHERE post_id = ?")) {
+                    ps.setLong(1, postId);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        if (!rs.next()) {
+                            throw new IllegalArgumentException("게시글이 없습니다.");
+                        }
+                        if (!memberId.equals(rs.getString("member_id"))) {
+                            throw new IllegalArgumentException("본인 글만 삭제할 수 있습니다.");
+                        }
+                    }
+                }
+                try (PreparedStatement ps = conn.prepareStatement(
+                        "DELETE FROM Recommendation WHERE post_id = ?")) {
+                    ps.setLong(1, postId);
+                    ps.executeUpdate();
+                }
+                try (PreparedStatement ps = conn.prepareStatement(
+                        "DELETE FROM Reply WHERE post_id = ?")) {
+                    ps.setLong(1, postId);
+                    ps.executeUpdate();
+                }
+                try (PreparedStatement ps = conn.prepareStatement(
+                        "DELETE FROM Post WHERE post_id = ? AND member_id = ?")) {
+                    ps.setLong(1, postId);
+                    ps.setString(2, memberId);
+                    int n = ps.executeUpdate();
+                    if (n == 0) {
+                        throw new IllegalArgumentException("삭제에 실패했습니다.");
+                    }
+                }
+                conn.commit();
+            } catch (Exception e) {
+                conn.rollback();
+                throw e;
+            } finally {
+                conn.setAutoCommit(true);
+            }
+        }
+    }
+
     public static boolean toggleRecommend(String memberId, long postId) throws Exception {
         if (memberId == null || memberId.isBlank()) {
             throw new IllegalArgumentException("로그인이 필요합니다.");

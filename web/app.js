@@ -16,6 +16,10 @@ const writeError = document.getElementById("writeError");
 const writeCancelBtn = document.getElementById("writeCancelBtn");
 const writeImage = document.getElementById("writeImage");
 const writeImagePreview = document.getElementById("writeImagePreview");
+const writeTitle = document.getElementById("writeTitle");
+const writeSubmit = document.getElementById("writeSubmit");
+const editPostBtn = document.getElementById("editPostBtn");
+const deletePostBtn = document.getElementById("deletePostBtn");
 const detailDialog = document.getElementById("detailDialog");
 const detailBody = document.getElementById("detailBody");
 const detailClose = document.getElementById("detailClose");
@@ -66,6 +70,12 @@ const PLACE_PREFETCH_CONCURRENCY = 2;
 let regionData = null;
 /** @type {string|null} data URL for pending write image */
 let pendingImageDataUrl = null;
+/** @type {number|null} 수정 중인 게시글 id */
+let editingPostId = null;
+/** 수정 시 기존 사진 URL (새 사진 없으면 유지) */
+let existingImageUrl = "";
+/** 수정 시 사진 제거 여부 */
+let removeExistingImage = false;
 
 function gemKey(gem) {
   return `${gem.resNm}|${gem.sido || ""}`;
@@ -592,6 +602,10 @@ function renderDetail() {
   recommendBtn.textContent = p.recommended ? `추천 취소 (${p.recommendCount})` : `추천 (${p.recommendCount})`;
   recommendBtn.classList.toggle("on", !!p.recommended);
 
+  const isOwner = !!(currentUser && p.memberId && currentUser.memberId === p.memberId);
+  editPostBtn.hidden = !isOwner;
+  deletePostBtn.hidden = !isOwner;
+
   const replies = p.replies || [];
   replyList.innerHTML = replies.length
     ? replies
@@ -634,9 +648,41 @@ function switchTab(tabId) {
 function resetWriteForm() {
   writeForm.reset();
   pendingImageDataUrl = null;
+  editingPostId = null;
+  existingImageUrl = "";
+  removeExistingImage = false;
   writeImagePreview.hidden = true;
   writeImagePreview.innerHTML = "";
   writeError.hidden = true;
+  if (writeTitle) writeTitle.textContent = "글쓰기";
+  if (writeSubmit) writeSubmit.textContent = "등록";
+}
+
+function openWriteForEdit(post) {
+  resetWriteForm();
+  editingPostId = post.postId;
+  existingImageUrl = post.imageUrl || "";
+  if (writeTitle) writeTitle.textContent = "글 수정";
+  if (writeSubmit) writeSubmit.textContent = "수정 저장";
+  document.getElementById("writeCategory").value = post.category === "FOREIGN" ? "FOREIGN" : "DOMESTIC";
+  document.getElementById("writeLocation").value = post.locationTitle || "";
+  document.getElementById("writeAddress").value = post.address || "";
+  document.getElementById("writeContent").value = post.content || "";
+  if (existingImageUrl) {
+    writeImagePreview.hidden = false;
+    writeImagePreview.innerHTML = `
+      <img src="${escapeHtml(existingImageUrl)}" alt="미리보기" />
+      <button type="button" id="clearWriteImageBtn" class="btn-ghost" style="margin-top:0.4rem">사진 제거</button>`;
+    document.getElementById("clearWriteImageBtn")?.addEventListener("click", () => {
+      existingImageUrl = "";
+      removeExistingImage = true;
+      pendingImageDataUrl = null;
+      writeImage.value = "";
+      writeImagePreview.hidden = true;
+      writeImagePreview.innerHTML = "";
+    });
+  }
+  writeDialog.showModal();
 }
 
 /** 선택한 이미지를 JPEG data URL로 리사이즈 (업로드 용량 절약) */
@@ -652,7 +698,7 @@ function fileToCompressedDataUrl(file) {
       const img = new Image();
       img.onerror = () => reject(new Error("이미지를 열지 못했습니다."));
       img.onload = () => {
-        const maxSide = 1280;
+        const maxSide = 960;
         let { width, height } = img;
         if (width > maxSide || height > maxSide) {
           const scale = maxSide / Math.max(width, height);
@@ -664,7 +710,7 @@ function fileToCompressedDataUrl(file) {
         canvas.height = height;
         const ctx = canvas.getContext("2d");
         ctx.drawImage(img, 0, 0, width, height);
-        resolve(canvas.toDataURL("image/jpeg", 0.82));
+        resolve(canvas.toDataURL("image/jpeg", 0.72));
       };
       img.src = reader.result;
     };
@@ -757,6 +803,7 @@ writeCancelBtn.addEventListener("click", () => {
 writeImage.addEventListener("change", async () => {
   writeError.hidden = true;
   pendingImageDataUrl = null;
+  removeExistingImage = false;
   writeImagePreview.hidden = true;
   writeImagePreview.innerHTML = "";
   const file = writeImage.files?.[0];
@@ -787,39 +834,99 @@ writeForm.addEventListener("submit", async (e) => {
   const submitBtn = document.getElementById("writeSubmit");
   submitBtn.disabled = true;
   try {
-    let imageUrl = "";
-    if (pendingImageDataUrl) {
-      imageUrl = await uploadImageDataUrl(pendingImageDataUrl);
-    }
     const payload = {
       memberId: currentMemberId(),
       locationTitle: document.getElementById("writeLocation").value.trim(),
       address: document.getElementById("writeAddress").value.trim(),
       content,
       category,
-      imageUrl,
     };
-    const res = await fetch("/api/posts", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "등록 실패");
-    writeDialog.close();
-    resetWriteForm();
-    const targetTab = category === "FOREIGN" ? "foreign" : "domestic";
-    if (activeTab !== targetTab) switchTab(targetTab);
-    else await loadBoardPosts(targetTab);
-    if (data.postId) openDetail(data.postId);
+
+    if (editingPostId) {
+      if (pendingImageDataUrl) {
+        payload.imageUrl = await uploadImageDataUrl(pendingImageDataUrl);
+      } else if (removeExistingImage) {
+        payload.imageUrl = "";
+      }
+      // imageUrl 미포함 = 기존 사진 유지
+      const res = await fetch(`/api/posts/${editingPostId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "수정 실패");
+      const savedId = editingPostId;
+      writeDialog.close();
+      resetWriteForm();
+      detailDialog.close();
+      const targetTab = category === "FOREIGN" ? "foreign" : "domestic";
+      if (activeTab !== targetTab) switchTab(targetTab);
+      else await loadBoardPosts(targetTab);
+      await openDetail(savedId);
+    } else {
+      let imageUrl = "";
+      if (pendingImageDataUrl) {
+        imageUrl = await uploadImageDataUrl(pendingImageDataUrl);
+      }
+      payload.imageUrl = imageUrl;
+      const res = await fetch("/api/posts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "등록 실패");
+      writeDialog.close();
+      resetWriteForm();
+      const targetTab = category === "FOREIGN" ? "foreign" : "domestic";
+      if (activeTab !== targetTab) switchTab(targetTab);
+      else await loadBoardPosts(targetTab);
+      if (data.postId) openDetail(data.postId);
+    }
   } catch (err) {
     writeError.hidden = false;
-    writeError.textContent = err.message || "등록 실패";
+    writeError.textContent = err.message || "저장 실패";
   } finally {
     submitBtn.disabled = false;
   }
 });
 
+editPostBtn.addEventListener("click", () => {
+  if (!currentDetail) return;
+  if (!requireLogin("로그인이 필요합니다.")) return;
+  if (currentUser.memberId !== currentDetail.memberId) {
+    alert("본인 글만 수정할 수 있습니다.");
+    return;
+  }
+  openWriteForEdit(currentDetail);
+});
+
+deletePostBtn.addEventListener("click", async () => {
+  if (!currentDetail) return;
+  if (!requireLogin("로그인이 필요합니다.")) return;
+  if (currentUser.memberId !== currentDetail.memberId) {
+    alert("본인 글만 삭제할 수 있습니다.");
+    return;
+  }
+  if (!confirm("이 게시글을 삭제할까요?")) return;
+  try {
+    const res = await fetch(`/api/posts/${currentDetail.postId}`, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ memberId: currentMemberId() }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "삭제 실패");
+    detailDialog.close();
+    currentDetail = null;
+    if (activeTab === "domestic" || activeTab === "foreign") {
+      await loadBoardPosts(activeTab);
+    }
+  } catch (err) {
+    alert(err.message || "삭제 실패");
+  }
+});
 detailClose.addEventListener("click", () => detailDialog.close());
 placeClose.addEventListener("click", () => placeDialog.close());
 

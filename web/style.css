@@ -515,6 +515,22 @@ body {
   background: var(--accent-dark);
 }
 
+.btn-danger {
+  border: none;
+  border-radius: 999px;
+  padding: 0.5rem 1rem;
+  font: inherit;
+  font-size: 0.88rem;
+  font-weight: 600;
+  cursor: pointer;
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.btn-danger:hover {
+  background: #fecaca;
+}
+
 .replies h3 {
   margin: 0.5rem 0 0;
   font-size: 0.95rem;

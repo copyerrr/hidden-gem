@@ -73,8 +73,9 @@ public final class BoardApi {
             return;
         }
         try {
-            Map<String, String> body = parseJson(readBody(ex));
-            String raw = body.getOrDefault("imageBase64", "");
+            String rawBody = readBody(ex);
+            // 큰 base64는 정규식 파서가 StackOverflow 나므로 필드만 직접 추출
+            String raw = extractJsonString(rawBody, "imageBase64");
             if (raw == null || raw.isBlank()) {
                 json(ex, 400, error("이미지가 없습니다."));
                 return;
@@ -93,11 +94,11 @@ public final class BoardApi {
                 json(ex, 400, error("이미지는 3MB 이하로 올려 주세요."));
                 return;
             }
-            String ext = extensionFor(body.getOrDefault("contentType", ""), bytes);
-            Files.createDirectories(UPLOAD_DIR);
-            String name = System.currentTimeMillis() + "-" + UUID.randomUUID().toString().substring(0, 8) + ext;
+            String contentType = extractJsonString(rawBody, "contentType");
+            String ext = extensionFor(contentType == null ? "" : contentType, bytes);
             Path absUpload = UPLOAD_DIR.toAbsolutePath().normalize();
             Files.createDirectories(absUpload);
+            String name = System.currentTimeMillis() + "-" + UUID.randomUUID().toString().substring(0, 8) + ext;
             Path file = absUpload.resolve(name).normalize();
             if (!file.startsWith(absUpload)) {
                 json(ex, 400, error("잘못된 경로"));
@@ -107,9 +108,59 @@ public final class BoardApi {
             json(ex, 201, "{\"url\":" + q("/uploads/" + name) + "}");
         } catch (IllegalArgumentException e) {
             json(ex, 400, error("이미지 형식이 올바르지 않습니다."));
+        } catch (OutOfMemoryError | StackOverflowError e) {
+            json(ex, 400, error("이미지가 너무 큽니다. 더 작은 사진으로 올려 주세요."));
         } catch (Exception e) {
             json(ex, 500, error(e.getMessage()));
         }
+    }
+
+    /** 큰 문자열 필드용 — 정규식 없이 "key":"value" 추출 */
+    private static String extractJsonString(String body, String key) {
+        if (body == null || key == null) {
+            return null;
+        }
+        String needle = "\"" + key + "\"";
+        int keyAt = body.indexOf(needle);
+        if (keyAt < 0) {
+            return null;
+        }
+        int colon = body.indexOf(':', keyAt + needle.length());
+        if (colon < 0) {
+            return null;
+        }
+        int i = colon + 1;
+        while (i < body.length() && Character.isWhitespace(body.charAt(i))) {
+            i++;
+        }
+        if (i >= body.length() || body.startsWith("null", i)) {
+            return null;
+        }
+        if (body.charAt(i) != '"') {
+            return null;
+        }
+        i++;
+        StringBuilder sb = new StringBuilder(Math.min(Math.max(16, body.length() - i), 2_000_000));
+        while (i < body.length()) {
+            char c = body.charAt(i++);
+            if (c == '\\' && i < body.length()) {
+                char n = body.charAt(i++);
+                switch (n) {
+                    case 'n' -> sb.append('\n');
+                    case 'r' -> sb.append('\r');
+                    case 't' -> sb.append('\t');
+                    case '"' -> sb.append('"');
+                    case '\\' -> sb.append('\\');
+                    case '/' -> sb.append('/');
+                    default -> sb.append(n);
+                }
+            } else if (c == '"') {
+                return sb.toString();
+            } else {
+                sb.append(c);
+            }
+        }
+        return null;
     }
 
     public static void handleUploads(HttpExchange ex) throws IOException {
@@ -167,8 +218,12 @@ public final class BoardApi {
             if (parts.length == 1) {
                 if ("GET".equalsIgnoreCase(method)) {
                     getPost(ex, postId);
+                } else if ("PUT".equalsIgnoreCase(method)) {
+                    updatePost(ex, postId);
+                } else if ("DELETE".equalsIgnoreCase(method)) {
+                    deletePost(ex, postId);
                 } else {
-                    json(ex, 405, error("GET only"));
+                    json(ex, 405, error("GET, PUT or DELETE only"));
                 }
                 return;
             }
@@ -237,6 +292,31 @@ public final class BoardApi {
                 body.get("category"),
                 body.get("imageUrl"));
         json(ex, 201, "{\"postId\":" + id + "}");
+    }
+
+    private static void updatePost(HttpExchange ex, long postId) throws Exception {
+        Map<String, String> body = parseJson(readBody(ex));
+        // imageUrl 키가 없으면 기존 유지(null 전달), 있으면 교체/삭제
+        String imageUrl = body.containsKey("imageUrl") ? body.get("imageUrl") : null;
+        BoardDb.updatePost(
+                postId,
+                body.get("memberId"),
+                body.get("content"),
+                body.get("locationTitle"),
+                body.get("address"),
+                body.get("category"),
+                imageUrl);
+        json(ex, 200, "{\"ok\":true,\"postId\":" + postId + "}");
+    }
+
+    private static void deletePost(HttpExchange ex, long postId) throws Exception {
+        Map<String, String> body = parseJson(readBody(ex));
+        String memberId = body.get("memberId");
+        if (memberId == null || memberId.isBlank()) {
+            memberId = query(ex.getRequestURI()).getOrDefault("memberId", "");
+        }
+        BoardDb.deletePost(postId, memberId);
+        json(ex, 200, "{\"ok\":true}");
     }
 
     private static void addReply(HttpExchange ex, long postId) throws Exception {

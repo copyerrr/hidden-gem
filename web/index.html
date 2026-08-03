@@ -90,7 +90,7 @@
   <!-- 글쓰기 -->
   <dialog id="writeDialog" class="modal">
     <form method="dialog" id="writeForm" class="modal-card">
-      <h2>글쓰기</h2>
+      <h2 id="writeTitle">글쓰기</h2>
       <label>게시판
         <select id="writeCategory" name="category">
           <option value="DOMESTIC">내국인 추천</option>
@@ -119,6 +119,8 @@
       <div id="detailBody"></div>
       <div class="detail-actions">
         <button type="button" id="recommendBtn" class="btn-primary">추천</button>
+        <button type="button" id="editPostBtn" class="btn-ghost" hidden>수정</button>
+        <button type="button" id="deletePostBtn" class="btn-danger" hidden>삭제</button>
       </div>
       <section class="replies">
         <h3>댓글</h3>
