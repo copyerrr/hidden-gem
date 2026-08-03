@@ -13,6 +13,9 @@ const panels = {
 const writeDialog = document.getElementById("writeDialog");
 const writeForm = document.getElementById("writeForm");
 const writeError = document.getElementById("writeError");
+const writeCancelBtn = document.getElementById("writeCancelBtn");
+const writeImage = document.getElementById("writeImage");
+const writeImagePreview = document.getElementById("writeImagePreview");
 const detailDialog = document.getElementById("detailDialog");
 const detailBody = document.getElementById("detailBody");
 const detailClose = document.getElementById("detailClose");
@@ -24,10 +27,28 @@ const placeDialog = document.getElementById("placeDialog");
 const placeBody = document.getElementById("placeBody");
 const placeClose = document.getElementById("placeClose");
 
+const authDialog = document.getElementById("authDialog");
+const authForm = document.getElementById("authForm");
+const authError = document.getElementById("authError");
+const authLabel = document.getElementById("authLabel");
+const authOpenBtn = document.getElementById("authOpenBtn");
+const logoutBtn = document.getElementById("logoutBtn");
+const authCancelBtn = document.getElementById("authCancelBtn");
+const authTitle = document.getElementById("authTitle");
+const authSubmit = document.getElementById("authSubmit");
+const authNickWrap = document.getElementById("authNickWrap");
+const authMemberId = document.getElementById("authMemberId");
+const authPassword = document.getElementById("authPassword");
+const authNickname = document.getElementById("authNickname");
+
 const DEFAULT_YM = "201201";
 const DEFAULT_LIMIT = "30";
-/** DB Member에 있는 기본 작성자 (로그인 없이 사용) */
-const DEFAULT_MEMBER_ID = "minji_test";
+const AUTH_STORAGE_KEY = "hiddengem_user";
+
+/** @type {{ memberId: string, nickname: string } | null} */
+let currentUser = null;
+/** @type {"login"|"register"} */
+let authMode = "login";
 
 /** @type {Array<object>} */
 let currentGems = [];
@@ -40,13 +61,86 @@ let activeTab = "ai";
 const placeDetailCache = new Map();
 /** @type {Map<string, Promise<object>>} */
 const placeDetailInflight = new Map();
-/** 상세 미리받기가 한 번에 TourAPI를 너무 치지 않도록 */
 const PLACE_PREFETCH_CONCURRENCY = 2;
 /** @type {{ sido: string[] } | null} */
 let regionData = null;
+/** @type {string|null} data URL for pending write image */
+let pendingImageDataUrl = null;
 
 function gemKey(gem) {
   return `${gem.resNm}|${gem.sido || ""}`;
+}
+
+function currentMemberId() {
+  return currentUser?.memberId || "";
+}
+
+function loadStoredUser() {
+  try {
+    const raw = localStorage.getItem(AUTH_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed && parsed.memberId) {
+      return { memberId: String(parsed.memberId), nickname: String(parsed.nickname || parsed.memberId) };
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+function saveUser(user) {
+  currentUser = user;
+  if (user) {
+    localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(user));
+  } else {
+    localStorage.removeItem(AUTH_STORAGE_KEY);
+  }
+  renderAuthBar();
+}
+
+function renderAuthBar() {
+  if (currentUser) {
+    authLabel.textContent = `${currentUser.nickname || currentUser.memberId}님`;
+    authOpenBtn.hidden = true;
+    logoutBtn.hidden = false;
+  } else {
+    authLabel.textContent = "로그인이 필요합니다";
+    authOpenBtn.hidden = false;
+    logoutBtn.hidden = true;
+  }
+}
+
+function requireLogin(message = "로그인이 필요합니다.") {
+  if (currentUser?.memberId) return true;
+  alert(message);
+  openAuthDialog("login");
+  return false;
+}
+
+function setAuthMode(mode) {
+  authMode = mode === "register" ? "register" : "login";
+  authTitle.textContent = authMode === "register" ? "회원가입" : "로그인";
+  authSubmit.textContent = authMode === "register" ? "가입하기" : "로그인";
+  // 닉네임은 회원가입에만 표시 (CSS display가 hidden을 덮지 않도록)
+  if (authMode === "register") {
+    authNickWrap.removeAttribute("hidden");
+  } else {
+    authNickWrap.setAttribute("hidden", "");
+    authNickname.value = "";
+  }
+  authPassword.autocomplete = authMode === "register" ? "new-password" : "current-password";
+  authError.hidden = true;
+  document.querySelectorAll(".auth-mode").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.mode === authMode);
+  });
+}
+
+function openAuthDialog(mode = "login") {
+  setAuthMode(mode);
+  authForm.reset();
+  authError.hidden = true;
+  authDialog.showModal();
 }
 
 function showStatus(el, message, type = "info") {
@@ -158,9 +252,6 @@ async function loadThumbnails(gems) {
   }
 }
 
-/**
- * 소개·이용정보·근처 맛집/관광지를 백그라운드로 미리 받아 클릭 즉시 표시.
- */
 async function fetchPlaceDetail(gem) {
   const key = gemKey(gem);
   if (placeDetailCache.has(key)) {
@@ -275,7 +366,6 @@ async function openPlaceDetail(gem) {
 
   try {
     const data = await fetchPlaceDetail(gem);
-    // 미리받기가 끝난 뒤에도 같은 항목이면 바로 표시
     if (gemKey(gem) === key) {
       renderPlaceDetail(gem, data);
     }
@@ -412,7 +502,7 @@ function renderPlaceDetail(gem, data) {
 function boardThumb(post) {
   const letter = (post.locationTitle || post.nickname || "?").charAt(0);
   if (post.imageUrl) {
-    return `<img src="${escapeHtml(post.imageUrl)}" alt="" loading="lazy" onerror="this.remove()" /><span class="thumb-letter">${escapeHtml(letter)}</span>`;
+    return `<img src="${escapeHtml(post.imageUrl)}" alt="" loading="lazy" onerror="this.remove();this.parentElement.querySelector('.thumb-fallback')?.removeAttribute('hidden')" /><span class="thumb-letter thumb-fallback" hidden>${escapeHtml(letter)}</span>`;
   }
   return `<span class="thumb-letter">${escapeHtml(letter)}</span>`;
 }
@@ -456,7 +546,7 @@ async function loadBoardPosts(tabId = activeTab) {
 
   showStatus(statusElBoard, "게시글을 불러오는 중…", "info");
   const qs = new URLSearchParams({
-    memberId: DEFAULT_MEMBER_ID,
+    memberId: currentMemberId(),
     category,
   });
   try {
@@ -472,7 +562,7 @@ async function loadBoardPosts(tabId = activeTab) {
 }
 
 async function openDetail(postId) {
-  const qs = `?memberId=${encodeURIComponent(DEFAULT_MEMBER_ID)}`;
+  const qs = `?memberId=${encodeURIComponent(currentMemberId())}`;
   try {
     const res = await fetch(`/api/posts/${postId}${qs}`);
     const data = await res.json();
@@ -488,7 +578,11 @@ async function openDetail(postId) {
 function renderDetail() {
   const p = currentDetail;
   if (!p) return;
+  const img = p.imageUrl
+    ? `<div class="detail-image"><img src="${escapeHtml(p.imageUrl)}" alt="" loading="lazy" /></div>`
+    : "";
   detailBody.innerHTML = `
+    ${img}
     <h2 class="detail-title">${escapeHtml(p.locationTitle || "장소 미정")}</h2>
     <p class="detail-meta">${escapeHtml(p.nickname || p.memberId)} · ${escapeHtml(p.regDate || "")}</p>
     <p class="detail-meta">${escapeHtml(p.address || "")}</p>
@@ -537,6 +631,58 @@ function switchTab(tabId) {
   }
 }
 
+function resetWriteForm() {
+  writeForm.reset();
+  pendingImageDataUrl = null;
+  writeImagePreview.hidden = true;
+  writeImagePreview.innerHTML = "";
+  writeError.hidden = true;
+}
+
+/** 선택한 이미지를 JPEG data URL로 리사이즈 (업로드 용량 절약) */
+function fileToCompressedDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    if (!file || !file.type.startsWith("image/")) {
+      reject(new Error("이미지 파일만 올릴 수 있습니다."));
+      return;
+    }
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("파일을 읽지 못했습니다."));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error("이미지를 열지 못했습니다."));
+      img.onload = () => {
+        const maxSide = 1280;
+        let { width, height } = img;
+        if (width > maxSide || height > maxSide) {
+          const scale = maxSide / Math.max(width, height);
+          width = Math.round(width * scale);
+          height = Math.round(height * scale);
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL("image/jpeg", 0.82));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+async function uploadImageDataUrl(dataUrl) {
+  const res = await fetch("/api/upload", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ imageBase64: dataUrl, contentType: "image/jpeg" }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || "사진 업로드 실패");
+  return data.url;
+}
+
 tabs.forEach((tab) => {
   tab.addEventListener("click", () => switchTab(tab.dataset.tab));
 });
@@ -549,8 +695,53 @@ sidoSelect.addEventListener("change", () => {
   loadHiddenGems();
 });
 
+authOpenBtn.addEventListener("click", () => openAuthDialog("login"));
+logoutBtn.addEventListener("click", () => {
+  saveUser(null);
+});
+authCancelBtn.addEventListener("click", () => {
+  authError.hidden = true;
+  authDialog.close();
+});
+document.querySelectorAll(".auth-mode").forEach((btn) => {
+  btn.addEventListener("click", () => setAuthMode(btn.dataset.mode));
+});
+
+authForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  authError.hidden = true;
+  const memberId = authMemberId.value.trim();
+  const password = authPassword.value;
+  const nickname = authNickname.value.trim();
+  if (!memberId || !password) {
+    authError.hidden = false;
+    authError.textContent = "아이디와 비밀번호를 입력하세요.";
+    return;
+  }
+  try {
+    const endpoint = authMode === "register" ? "/api/register" : "/api/login";
+    const payload =
+      authMode === "register"
+        ? { memberId, password, nickname }
+        : { memberId, password };
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "실패");
+    saveUser({ memberId: data.memberId, nickname: data.nickname || data.memberId });
+    authDialog.close();
+  } catch (err) {
+    authError.hidden = false;
+    authError.textContent = err.message || "실패";
+  }
+});
+
 writeBtn.addEventListener("click", () => {
-  writeError.hidden = true;
+  if (!requireLogin("글쓰기는 로그인 후 이용할 수 있습니다.")) return;
+  resetWriteForm();
   const cat = document.getElementById("writeCategory");
   if (cat) {
     cat.value = activeTab === "foreign" ? "FOREIGN" : "DOMESTIC";
@@ -558,23 +749,56 @@ writeBtn.addEventListener("click", () => {
   writeDialog.showModal();
 });
 
-writeForm.addEventListener("submit", async (e) => {
-  const submitter = e.submitter;
-  if (submitter && submitter.value === "cancel") {
-    writeError.hidden = true;
-    return;
+writeCancelBtn.addEventListener("click", () => {
+  resetWriteForm();
+  writeDialog.close();
+});
+
+writeImage.addEventListener("change", async () => {
+  writeError.hidden = true;
+  pendingImageDataUrl = null;
+  writeImagePreview.hidden = true;
+  writeImagePreview.innerHTML = "";
+  const file = writeImage.files?.[0];
+  if (!file) return;
+  try {
+    pendingImageDataUrl = await fileToCompressedDataUrl(file);
+    writeImagePreview.hidden = false;
+    writeImagePreview.innerHTML = `<img src="${pendingImageDataUrl}" alt="미리보기" />`;
+  } catch (err) {
+    writeImage.value = "";
+    writeError.hidden = false;
+    writeError.textContent = err.message || "사진을 불러오지 못했습니다.";
   }
+});
+
+writeForm.addEventListener("submit", async (e) => {
   e.preventDefault();
+  if (!requireLogin("글쓰기는 로그인 후 이용할 수 있습니다.")) return;
   writeError.hidden = true;
   const category = document.getElementById("writeCategory")?.value || "DOMESTIC";
-  const payload = {
-    memberId: DEFAULT_MEMBER_ID,
-    locationTitle: document.getElementById("writeLocation").value.trim(),
-    address: document.getElementById("writeAddress").value.trim(),
-    content: document.getElementById("writeContent").value.trim(),
-    category,
-  };
+  const content = document.getElementById("writeContent").value.trim();
+  if (!content) {
+    writeError.hidden = false;
+    writeError.textContent = "내용을 입력하세요.";
+    return;
+  }
+
+  const submitBtn = document.getElementById("writeSubmit");
+  submitBtn.disabled = true;
   try {
+    let imageUrl = "";
+    if (pendingImageDataUrl) {
+      imageUrl = await uploadImageDataUrl(pendingImageDataUrl);
+    }
+    const payload = {
+      memberId: currentMemberId(),
+      locationTitle: document.getElementById("writeLocation").value.trim(),
+      address: document.getElementById("writeAddress").value.trim(),
+      content,
+      category,
+      imageUrl,
+    };
     const res = await fetch("/api/posts", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -583,7 +807,7 @@ writeForm.addEventListener("submit", async (e) => {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "등록 실패");
     writeDialog.close();
-    writeForm.reset();
+    resetWriteForm();
     const targetTab = category === "FOREIGN" ? "foreign" : "domestic";
     if (activeTab !== targetTab) switchTab(targetTab);
     else await loadBoardPosts(targetTab);
@@ -591,6 +815,8 @@ writeForm.addEventListener("submit", async (e) => {
   } catch (err) {
     writeError.hidden = false;
     writeError.textContent = err.message || "등록 실패";
+  } finally {
+    submitBtn.disabled = false;
   }
 });
 
@@ -615,16 +841,19 @@ resultsEl.addEventListener("keydown", (e) => {
 
 recommendBtn.addEventListener("click", async () => {
   if (!currentDetail) return;
+  if (!requireLogin("추천은 로그인 후 이용할 수 있습니다.")) return;
   try {
     const res = await fetch(`/api/posts/${currentDetail.postId}/recommend`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ memberId: DEFAULT_MEMBER_ID }),
+      body: JSON.stringify({ memberId: currentMemberId() }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "추천 실패");
     await openDetail(currentDetail.postId);
-    loadBoardPosts(activeTab);
+    if (activeTab === "domestic" || activeTab === "foreign") {
+      loadBoardPosts(activeTab);
+    }
   } catch (err) {
     alert(err.message || "추천 실패");
   }
@@ -633,22 +862,27 @@ recommendBtn.addEventListener("click", async () => {
 replyForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   if (!currentDetail) return;
+  if (!requireLogin("댓글은 로그인 후 이용할 수 있습니다.")) return;
   const content = replyInput.value.trim();
   if (!content) return;
   try {
     const res = await fetch(`/api/posts/${currentDetail.postId}/replies`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ memberId: DEFAULT_MEMBER_ID, content }),
+      body: JSON.stringify({ memberId: currentMemberId(), content }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "댓글 등록 실패");
     replyInput.value = "";
     await openDetail(currentDetail.postId);
-    loadBoardPosts(activeTab);
+    if (activeTab === "domestic" || activeTab === "foreign") {
+      loadBoardPosts(activeTab);
+    }
   } catch (err) {
     alert(err.message || "댓글 등록 실패");
   }
 });
 
+currentUser = loadStoredUser();
+renderAuthBar();
 loadRegions().then(() => loadHiddenGems());

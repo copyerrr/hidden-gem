@@ -17,6 +17,11 @@
         <button type="button" class="tab" data-tab="domestic" role="tab" aria-selected="false">내국인 추천</button>
         <button type="button" class="tab" data-tab="foreign" role="tab" aria-selected="false">외국인 추천</button>
       </nav>
+      <div class="auth-bar">
+        <span id="authLabel" class="auth-label">로그인이 필요합니다</span>
+        <button type="button" id="authOpenBtn" class="auth-btn">로그인 / 가입</button>
+        <button type="button" id="logoutBtn" class="auth-btn" hidden>로그아웃</button>
+      </div>
     </header>
 
     <!-- AI 추천 패널 -->
@@ -63,6 +68,25 @@
     <button type="button" id="writeBtn" class="fab" title="글쓰기">글쓰기</button>
   </div>
 
+  <!-- 로그인 / 회원가입 -->
+  <dialog id="authDialog" class="modal">
+    <form method="dialog" id="authForm" class="modal-card">
+      <h2 id="authTitle">로그인</h2>
+      <div class="auth-mode-tabs">
+        <button type="button" class="auth-mode active" data-mode="login">로그인</button>
+        <button type="button" class="auth-mode" data-mode="register">회원가입</button>
+      </div>
+      <label>아이디<input id="authMemberId" name="memberId" autocomplete="username" required></label>
+      <label>비밀번호<input id="authPassword" name="password" type="password" autocomplete="current-password" required></label>
+      <label id="authNickWrap" hidden>닉네임<input id="authNickname" name="nickname" placeholder="선택 (없으면 아이디)"></label>
+      <p id="authError" class="form-error" hidden></p>
+      <div class="modal-actions">
+        <button type="button" id="authCancelBtn" class="btn-ghost">취소</button>
+        <button type="submit" class="btn-primary" id="authSubmit">로그인</button>
+      </div>
+    </form>
+  </dialog>
+
   <!-- 글쓰기 -->
   <dialog id="writeDialog" class="modal">
     <form method="dialog" id="writeForm" class="modal-card">
@@ -75,10 +99,14 @@
       </label>
       <label>장소명<input id="writeLocation" name="locationTitle" placeholder="예: 부산시립미술관"></label>
       <label>주소<input id="writeAddress" name="address" placeholder="선택"></label>
+      <label>사진
+        <input id="writeImage" name="image" type="file" accept="image/*">
+      </label>
+      <div id="writeImagePreview" class="write-preview" hidden></div>
       <label>내용<textarea id="writeContent" name="content" rows="5" required placeholder="방문 후기나 추천 이유를 적어 주세요."></textarea></label>
       <p id="writeError" class="form-error" hidden></p>
       <div class="modal-actions">
-        <button type="submit" value="cancel" class="btn-ghost">취소</button>
+        <button type="button" id="writeCancelBtn" class="btn-ghost">취소</button>
         <button type="submit" value="ok" class="btn-primary" id="writeSubmit">등록</button>
       </div>
     </form>

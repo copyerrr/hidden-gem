@@ -74,6 +74,44 @@ public final class BoardDb {
         }
     }
 
+    /** 회원가입. 성공 시 memberId·nickname 반환 */
+    public static Map<String, String> register(String memberId, String password, String nickname)
+            throws Exception {
+        if (memberId == null || memberId.isBlank()) {
+            throw new IllegalArgumentException("아이디를 입력하세요.");
+        }
+        if (password == null || password.isBlank()) {
+            throw new IllegalArgumentException("비밀번호를 입력하세요.");
+        }
+        String id = memberId.trim();
+        String nick = (nickname == null || nickname.isBlank()) ? id : nickname.trim();
+        if (id.length() > 40) {
+            throw new IllegalArgumentException("아이디는 40자 이내로 입력하세요.");
+        }
+        try (Connection conn = open()) {
+            try (PreparedStatement check = conn.prepareStatement(
+                    "SELECT 1 FROM Member WHERE member_id = ? LIMIT 1")) {
+                check.setString(1, id);
+                try (ResultSet rs = check.executeQuery()) {
+                    if (rs.next()) {
+                        throw new IllegalArgumentException("이미 사용 중인 아이디입니다.");
+                    }
+                }
+            }
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "INSERT INTO Member (member_id, password, nickname) VALUES (?, ?, ?)")) {
+                ps.setString(1, id);
+                ps.setString(2, password);
+                ps.setString(3, nick);
+                ps.executeUpdate();
+            }
+            Map<String, String> out = new LinkedHashMap<>();
+            out.put("memberId", id);
+            out.put("nickname", nick);
+            return out;
+        }
+    }
+
     public static List<Map<String, Object>> listPosts(String viewerId, String category) throws Exception {
         String cat = normalizeCategory(category);
         String sql = """
@@ -134,10 +172,15 @@ public final class BoardDb {
     }
 
     public static long createPost(
-            String memberId, String content, String locationTitle, String address, String category)
+            String memberId,
+            String content,
+            String locationTitle,
+            String address,
+            String category,
+            String imageUrl)
             throws Exception {
         if (memberId == null || memberId.isBlank()) {
-            throw new IllegalArgumentException("memberId가 필요합니다.");
+            throw new IllegalArgumentException("로그인이 필요합니다.");
         }
         if (content == null || content.isBlank()) {
             throw new IllegalArgumentException("내용을 입력하세요.");
@@ -149,8 +192,11 @@ public final class BoardDb {
                 ensureMember(conn, memberId);
                 String title = (locationTitle == null || locationTitle.isBlank())
                         ? "장소 미정" : locationTitle.trim();
-                long locationId = insertLocation(conn, title,
-                        address == null ? "" : address.trim());
+                long locationId = insertLocation(
+                        conn,
+                        title,
+                        address == null ? "" : address.trim(),
+                        imageUrl == null ? "" : imageUrl.trim());
                 long postId;
                 try (PreparedStatement ps = conn.prepareStatement(
                         "INSERT INTO Post (member_id, location_id, content, category) VALUES (?, ?, ?, ?)",
@@ -318,7 +364,8 @@ public final class BoardDb {
         }
     }
 
-    private static long insertLocation(Connection conn, String title, String address) throws SQLException {
+    private static long insertLocation(Connection conn, String title, String address, String imageUrl)
+            throws SQLException {
         long nextId;
         try (Statement st = conn.createStatement();
              ResultSet rs = st.executeQuery("SELECT COALESCE(MAX(location_id), 0) + 1 AS next_id FROM Location")) {
@@ -326,10 +373,11 @@ public final class BoardDb {
             nextId = rs.getLong("next_id");
         }
         try (PreparedStatement ps = conn.prepareStatement(
-                "INSERT INTO Location (location_id, title, address, tel, image_url) VALUES (?, ?, ?, NULL, NULL)")) {
+                "INSERT INTO Location (location_id, title, address, tel, image_url) VALUES (?, ?, ?, NULL, ?)")) {
             ps.setLong(1, nextId);
             ps.setString(2, title);
             ps.setString(3, address.isBlank() ? null : address);
+            ps.setString(4, imageUrl.isBlank() ? null : imageUrl);
             ps.executeUpdate();
             return nextId;
         }

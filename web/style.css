@@ -323,6 +323,61 @@ body {
   cursor: pointer;
 }
 
+.auth-mode-tabs {
+  display: flex;
+  gap: 0.35rem;
+  background: var(--bg);
+  border-radius: 999px;
+  padding: 0.2rem;
+}
+
+.auth-mode {
+  flex: 1;
+  border: none;
+  background: transparent;
+  border-radius: 999px;
+  padding: 0.4rem 0.5rem;
+  font: inherit;
+  font-size: 0.82rem;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.auth-mode.active {
+  background: var(--surface);
+  color: var(--text);
+  font-weight: 700;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+.write-preview {
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  max-height: 180px;
+}
+
+.write-preview img {
+  display: block;
+  width: 100%;
+  max-height: 180px;
+  object-fit: cover;
+}
+
+.detail-image {
+  margin: -0.25rem -0.25rem 0.75rem;
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.detail-image img {
+  display: block;
+  width: 100%;
+  max-height: 240px;
+  object-fit: cover;
+}
+
 .panel-hint {
   margin: 0;
   font-size: 0.85rem;
@@ -364,6 +419,11 @@ body {
   gap: 0.3rem;
   font-size: 0.82rem;
   color: var(--muted);
+}
+
+.modal-card label[hidden],
+[hidden] {
+  display: none !important;
 }
 
 .modal-card input,

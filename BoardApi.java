@@ -2,21 +2,27 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import com.sun.net.httpserver.HttpExchange;
 
 /**
- * 게시판 REST: /api/login, /api/posts/...
+ * 게시판 REST: /api/login, /api/register, /api/upload, /api/posts/...
  */
 public final class BoardApi {
 
     private static final Pattern JSON_FIELD = Pattern.compile(
             "\"(\\w+)\"\\s*:\\s*(\"(?:\\\\.|[^\"\\\\])*\"|null|true|false|-?\\d+(?:\\.\\d+)?)");
+    private static final Path UPLOAD_DIR = Path.of("uploads");
+    private static final int MAX_UPLOAD_BYTES = 3 * 1024 * 1024;
 
     private BoardApi() {
     }
@@ -35,13 +41,104 @@ public final class BoardApi {
                 json(ex, 401, error("아이디 또는 비밀번호가 올바르지 않습니다."));
                 return;
             }
-            json(ex, 200, "{"
-                    + "\"memberId\":" + q(user.get("memberId"))
-                    + ",\"nickname\":" + q(user.get("nickname"))
-                    + "}");
+            json(ex, 200, userJson(user));
         } catch (Exception e) {
             json(ex, 500, error(e.getMessage()));
         }
+    }
+
+    public static void handleRegister(HttpExchange ex) throws IOException {
+        if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) {
+            json(ex, 405, error("POST only"));
+            return;
+        }
+        try {
+            Map<String, String> body = parseJson(readBody(ex));
+            Map<String, String> user = BoardDb.register(
+                    body.getOrDefault("memberId", ""),
+                    body.getOrDefault("password", ""),
+                    body.getOrDefault("nickname", ""));
+            json(ex, 201, userJson(user));
+        } catch (IllegalArgumentException e) {
+            json(ex, 400, error(e.getMessage()));
+        } catch (Exception e) {
+            json(ex, 500, error(e.getMessage()));
+        }
+    }
+
+    /** JSON { imageBase64, contentType? } → { url } */
+    public static void handleUpload(HttpExchange ex) throws IOException {
+        if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) {
+            json(ex, 405, error("POST only"));
+            return;
+        }
+        try {
+            Map<String, String> body = parseJson(readBody(ex));
+            String raw = body.getOrDefault("imageBase64", "");
+            if (raw == null || raw.isBlank()) {
+                json(ex, 400, error("이미지가 없습니다."));
+                return;
+            }
+            String b64 = raw.trim();
+            int comma = b64.indexOf(',');
+            if (b64.startsWith("data:") && comma > 0) {
+                b64 = b64.substring(comma + 1);
+            }
+            byte[] bytes = Base64.getDecoder().decode(b64);
+            if (bytes.length == 0) {
+                json(ex, 400, error("빈 이미지입니다."));
+                return;
+            }
+            if (bytes.length > MAX_UPLOAD_BYTES) {
+                json(ex, 400, error("이미지는 3MB 이하로 올려 주세요."));
+                return;
+            }
+            String ext = extensionFor(body.getOrDefault("contentType", ""), bytes);
+            Files.createDirectories(UPLOAD_DIR);
+            String name = System.currentTimeMillis() + "-" + UUID.randomUUID().toString().substring(0, 8) + ext;
+            Path absUpload = UPLOAD_DIR.toAbsolutePath().normalize();
+            Files.createDirectories(absUpload);
+            Path file = absUpload.resolve(name).normalize();
+            if (!file.startsWith(absUpload)) {
+                json(ex, 400, error("잘못된 경로"));
+                return;
+            }
+            Files.write(file, bytes);
+            json(ex, 201, "{\"url\":" + q("/uploads/" + name) + "}");
+        } catch (IllegalArgumentException e) {
+            json(ex, 400, error("이미지 형식이 올바르지 않습니다."));
+        } catch (Exception e) {
+            json(ex, 500, error(e.getMessage()));
+        }
+    }
+
+    public static void handleUploads(HttpExchange ex) throws IOException {
+        if (!"GET".equalsIgnoreCase(ex.getRequestMethod())
+                && !"HEAD".equalsIgnoreCase(ex.getRequestMethod())) {
+            json(ex, 405, error("GET only"));
+            return;
+        }
+        String path = ex.getRequestURI().getPath();
+        String name = path.substring("/uploads/".length());
+        if (name.isBlank() || name.contains("..") || name.contains("/") || name.contains("\\")) {
+            respondBytes(ex, 404, "text/plain; charset=utf-8", "Not Found".getBytes(StandardCharsets.UTF_8));
+            return;
+        }
+        Path absUpload = UPLOAD_DIR.toAbsolutePath().normalize();
+        Path file = absUpload.resolve(name).normalize();
+        if (!file.startsWith(absUpload) || !Files.isRegularFile(file)) {
+            respondBytes(ex, 404, "text/plain; charset=utf-8", "Not Found".getBytes(StandardCharsets.UTF_8));
+            return;
+        }
+        String ct = contentType(name);
+        byte[] bytes = Files.readAllBytes(file);
+        if ("HEAD".equalsIgnoreCase(ex.getRequestMethod())) {
+            ex.getResponseHeaders().set("Content-Type", ct);
+            ex.sendResponseHeaders(200, -1);
+            ex.close();
+            return;
+        }
+        respondBytes(ex, 200, ct, bytes);
     }
 
     public static void handlePosts(HttpExchange ex) throws IOException {
@@ -59,9 +156,6 @@ public final class BoardApi {
                 return;
             }
 
-            // /api/posts/{id}
-            // /api/posts/{id}/replies
-            // /api/posts/{id}/recommend
             String rest = path.substring("/api/posts/".length());
             String[] parts = rest.split("/");
             if (parts.length == 0 || parts[0].isBlank()) {
@@ -140,7 +234,8 @@ public final class BoardApi {
                 body.get("content"),
                 body.get("locationTitle"),
                 body.get("address"),
-                body.get("category"));
+                body.get("category"),
+                body.get("imageUrl"));
         json(ex, 201, "{\"postId\":" + id + "}");
     }
 
@@ -154,6 +249,13 @@ public final class BoardApi {
         Map<String, String> body = parseJson(readBody(ex));
         boolean on = BoardDb.toggleRecommend(body.get("memberId"), postId);
         json(ex, 200, "{\"recommended\":" + on + "}");
+    }
+
+    private static String userJson(Map<String, String> user) {
+        return "{"
+                + "\"memberId\":" + q(user.get("memberId"))
+                + ",\"nickname\":" + q(user.get("nickname"))
+                + "}";
     }
 
     @SuppressWarnings("unchecked")
@@ -192,6 +294,29 @@ public final class BoardApi {
         }
         sb.append('}');
         return sb.toString();
+    }
+
+    private static String extensionFor(String contentType, byte[] bytes) {
+        String ct = contentType == null ? "" : contentType.toLowerCase();
+        if (ct.contains("png") || (bytes.length > 3 && bytes[0] == (byte) 0x89 && bytes[1] == 0x50)) {
+            return ".png";
+        }
+        if (ct.contains("webp")) {
+            return ".webp";
+        }
+        if (ct.contains("gif")) {
+            return ".gif";
+        }
+        return ".jpg";
+    }
+
+    private static String contentType(String name) {
+        String lower = name.toLowerCase();
+        if (lower.endsWith(".png")) return "image/png";
+        if (lower.endsWith(".webp")) return "image/webp";
+        if (lower.endsWith(".gif")) return "image/gif";
+        if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+        return "application/octet-stream";
     }
 
     private static String str(Object o) {
@@ -246,8 +371,12 @@ public final class BoardApi {
     }
 
     private static void json(HttpExchange ex, int code, String body) throws IOException {
-        byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
-        ex.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8");
+        respondBytes(ex, code, "application/json; charset=utf-8", body.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static void respondBytes(HttpExchange ex, int code, String contentType, byte[] bytes)
+            throws IOException {
+        ex.getResponseHeaders().set("Content-Type", contentType);
         ex.sendResponseHeaders(code, bytes.length);
         try (OutputStream os = ex.getResponseBody()) {
             os.write(bytes);

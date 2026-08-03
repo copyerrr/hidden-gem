@@ -47,7 +47,7 @@ import org.w3c.dom.NodeList;
  * 실행: {@code start.bat} 또는 {@code start.sh}
  * 브라우저: {@code http://localhost:8080}
  * <p>
- * 게시판 DB: {@code /api/login}, {@code /api/posts} (Post / Reply / Recommendation / Location)
+ * 게시판 DB: {@code /api/login}, {@code /api/register}, {@code /api/upload}, {@code /api/posts}
  */
 public class HiddenGemServer {
 
@@ -106,6 +106,9 @@ public class HiddenGemServer {
         server.createContext("/api/place-detail", HiddenGemServer::handlePlaceDetail);
         server.createContext("/api/regions", HiddenGemServer::handleRegions);
         server.createContext("/api/login", BoardApi::handleLogin);
+        server.createContext("/api/register", BoardApi::handleRegister);
+        server.createContext("/api/upload", BoardApi::handleUpload);
+        server.createContext("/uploads", BoardApi::handleUploads);
         server.createContext("/api/posts", BoardApi::handlePosts);
         server.setExecutor(Executors.newFixedThreadPool(8));
         server.start();

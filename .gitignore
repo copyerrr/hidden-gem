@@ -9,6 +9,7 @@ lib/
 
 # API dump / local outputs
 out/
+uploads/
 
 # IDE / OS
 .vscode/
