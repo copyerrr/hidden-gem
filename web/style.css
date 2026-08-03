@@ -94,30 +94,44 @@ body {
   align-items: center;
   padding: 0.75rem 0;
   gap: 0.75rem;
+  flex-wrap: wrap;
 }
 
+.region-wrap,
 .sort-wrap {
   display: flex;
   align-items: center;
   gap: 0.4rem;
-  margin-left: auto;
   font-size: 0.85rem;
   color: var(--muted);
 }
 
+.sort-wrap {
+  margin-left: auto;
+}
+
+.region-wrap select,
 .sort-wrap select {
-  border: none;
-  background: transparent;
+  border: 1px solid var(--border);
+  background: var(--surface);
   font: inherit;
   font-size: 0.85rem;
   color: var(--text);
   cursor: pointer;
-  padding: 0.25rem 0.15rem;
+  padding: 0.35rem 0.5rem;
+  border-radius: 8px;
+  max-width: 9.5rem;
 }
 
+.region-wrap select:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.region-wrap select:focus,
 .sort-wrap select:focus {
   outline: 2px solid var(--accent);
-  border-radius: 4px;
+  border-radius: 8px;
 }
 
 /* ── 상태 ── */
@@ -353,7 +367,8 @@ body {
 }
 
 .modal-card input,
-.modal-card textarea {
+.modal-card textarea,
+.modal-card select {
   font: inherit;
   font-size: 0.95rem;
   color: var(--text);

@@ -79,7 +79,6 @@ public class HiddenGemServer {
             Map.entry("고구려대장간마을", List.of("고구려대장간마을")),
             Map.entry("태릉강릉조선왕릉전시관", List.of("태릉", "강릉", "조선왕릉")),
             Map.entry("한국전통음식문화체험관", List.of("정강원", "한국전통음식문화체험관")),
-            Map.entry("카트랜드", List.of("카트체험", "파주카트")),
             Map.entry("골드힐카운티", List.of("골드힐")),
             Map.entry("설악파크", List.of("설악파크")),
             Map.entry("달곁에별", List.of("달곁에별")));
@@ -176,15 +175,16 @@ public class HiddenGemServer {
             Map<String, String> qmap = query(ex.getRequestURI());
             String resNm = qmap.getOrDefault("resNm", "").trim();
             String sido = qmap.getOrDefault("sido", "").trim();
+            String gungu = qmap.getOrDefault("gungu", "").trim();
             if (resNm.isBlank()) {
                 respond(ex, 400, "application/json; charset=utf-8",
                         jsonError("resNm required").getBytes(StandardCharsets.UTF_8));
                 return;
             }
-            String cacheKey = resNm + "|" + sido;
+            String cacheKey = resNm + "|" + sido + "|" + gungu;
             String body = PLACE_DETAIL_CACHE.get(cacheKey);
             if (body == null) {
-                body = buildPlaceDetailJson(resNm, sido);
+                body = buildPlaceDetailJson(resNm, sido, gungu);
                 PLACE_DETAIL_CACHE.put(cacheKey, body);
             }
             respond(ex, 200, "application/json; charset=utf-8", body.getBytes(StandardCharsets.UTF_8));
@@ -279,21 +279,21 @@ public class HiddenGemServer {
     }
 
     private static String buildHiddenGemsJson(String ym, String sido, String gungu, int limit) throws Exception {
-        List<Attraction> attractions = filterAttractions(loadYmData(ym), sido, gungu);
-
-        Map<String, Integer> foreignRank = rankMap(attractions, a -> a.foreign);
-        Map<String, Integer> domesticRank = rankMap(attractions, a -> a.domestic);
+        List<Attraction> all = loadYmData(ym);
+        // 순위·점수는 전국 기준으로 유지한 뒤, 지역 필터는 결과만 자른다.
+        Map<String, Integer> foreignRank = rankMap(all, a -> a.foreign);
+        Map<String, Integer> domesticRank = rankMap(all, a -> a.domestic);
 
         List<HiddenGem> gems = new ArrayList<>();
-        for (Attraction a : attractions) {
+        for (Attraction a : all) {
             if (a.foreign < MIN_FOREIGN_VISITORS || a.domestic <= 0) {
                 continue;
             }
             if (isBlockedName(a.resNm)) {
                 continue;
             }
-            int fRank = foreignRank.getOrDefault(a.key(), attractions.size());
-            int dRank = domesticRank.getOrDefault(a.key(), attractions.size());
+            int fRank = foreignRank.getOrDefault(a.key(), all.size());
+            int dRank = domesticRank.getOrDefault(a.key(), all.size());
             if (dRank <= MIN_DOMESTIC_RANK || fRank <= MIN_FOREIGN_RANK) {
                 continue;
             }
@@ -308,6 +308,17 @@ public class HiddenGemServer {
         gems.sort(Comparator
                 .comparingDouble((HiddenGem g) -> g.gemScore).reversed()
                 .thenComparing(Comparator.comparingDouble((HiddenGem g) -> g.foreignShare).reversed()));
+
+        if (!sido.isBlank() || !gungu.isBlank()) {
+            gems.removeIf(g -> {
+                if (!sido.isBlank() && !sido.equals(g.sido)) {
+                    return true;
+                }
+                return !gungu.isBlank() && !gungu.equals(g.gungu);
+            });
+        }
+
+        List<Attraction> scoped = filterAttractions(all, sido, gungu);
         if (gems.size() > limit) {
             gems = new ArrayList<>(gems.subList(0, limit));
         }
@@ -316,7 +327,7 @@ public class HiddenGemServer {
         sb.append("{\"ym\":").append(q(ym))
                 .append(",\"sido\":").append(sido.isEmpty() ? "null" : q(sido))
                 .append(",\"gungu\":").append(gungu.isEmpty() ? "null" : q(gungu))
-                .append(",\"totalAttractions\":").append(attractions.size())
+                .append(",\"totalAttractions\":").append(scoped.size())
                 .append(",\"gems\":[");
         for (int i = 0; i < gems.size(); i++) {
             if (i > 0) {
@@ -517,8 +528,8 @@ public class HiddenGemServer {
         return sb.toString();
     }
 
-    private static String buildPlaceDetailJson(String resNm, String sido) throws Exception {
-        SearchHit hit = resolveSearchHit(resNm, sido);
+    private static String buildPlaceDetailJson(String resNm, String sido, String gungu) throws Exception {
+        SearchHit hit = resolveSearchHit(resNm, sido, gungu);
         if (hit == null || hit.contentId.isBlank()) {
             return "{\"found\":false,\"resNm\":" + q(resNm) + ",\"sido\":" + q(sido)
                     + ",\"message\":" + q("관광공사 DB에서 장소를 찾지 못했습니다.") + "}";
@@ -612,13 +623,13 @@ public class HiddenGemServer {
         sb.append(']');
     }
 
-    private static SearchHit resolveSearchHit(String resNm, String sido) {
-        for (String keyword : thumbnailSearchKeywords(resNm)) {
+    private static SearchHit resolveSearchHit(String resNm, String sido, String gungu) {
+        for (String keyword : thumbnailSearchKeywords(resNm, sido, gungu)) {
             try {
                 String xml = korSearchKeyword(keyword);
                 Document doc = parseXml(xml);
                 checkResult(doc);
-                SearchHit hit = pickSearchHit(doc, resNm, keyword, sido);
+                SearchHit hit = pickSearchHit(doc, resNm, keyword, sido, gungu);
                 if (hit != null) {
                     return hit;
                 }
@@ -629,11 +640,14 @@ public class HiddenGemServer {
         return null;
     }
 
-    private static SearchHit pickSearchHit(Document doc, String originalName, String keyword, String sido) {
+    private static SearchHit pickSearchHit(
+            Document doc, String originalName, String keyword, String sido, String gungu) {
         NodeList items = doc.getElementsByTagName("item");
-        SearchHit nameMatch = null;
+        SearchHit nameAndRegion = null;
+        SearchHit anyInRegion = null;
+        SearchHit nameOnly = null;
         SearchHit any = null;
-        String sidoShort = shortenSido(sido);
+        boolean requireRegion = !sido.isBlank() || !gungu.isBlank();
 
         for (int i = 0; i < items.getLength(); i++) {
             Element item = (Element) items.item(i);
@@ -643,34 +657,57 @@ public class HiddenGemServer {
             }
             String title = childText(item, "title");
             String addr1 = childText(item, "addr1");
-            String mapx = childText(item, "mapx");
-            String mapy = childText(item, "mapy");
-            String img = imageFromItem(item);
             SearchHit hit = new SearchHit(
                     contentId,
                     childText(item, "contenttypeid"),
                     title,
                     addr1,
-                    mapx,
-                    mapy,
-                    img);
+                    childText(item, "mapx"),
+                    childText(item, "mapy"),
+                    imageFromItem(item));
 
-            boolean regionOk = sido.isBlank()
-                    || addr1.contains(sido)
-                    || (!sidoShort.isBlank() && addr1.contains(sidoShort));
+            boolean regionOk = regionMatches(addr1, sido, gungu);
             boolean nameOk = namesMatch(title, originalName) || namesMatch(title, keyword);
 
             if (any == null) {
                 any = hit;
             }
+            if (regionOk && anyInRegion == null) {
+                anyInRegion = hit;
+            }
             if (nameOk && regionOk) {
                 return hit;
             }
-            if (nameOk && nameMatch == null) {
-                nameMatch = hit;
+            if (nameOk && nameAndRegion == null && regionOk) {
+                nameAndRegion = hit;
+            }
+            if (nameOk && nameOnly == null) {
+                nameOnly = hit;
             }
         }
-        return nameMatch != null ? nameMatch : any;
+        if (requireRegion) {
+            // 시도/시군구가 있으면 다른 지역 결과로 대체하지 않음 (오매칭 방지)
+            return nameAndRegion != null ? nameAndRegion : null;
+        }
+        return nameOnly != null ? nameOnly : any;
+    }
+
+    /** 주소가 요청한 시·도와 시군구에 속하는지 */
+    private static boolean regionMatches(String addr1, String sido, String gungu) {
+        if (addr1 == null || addr1.isBlank()) {
+            return sido.isBlank() && gungu.isBlank();
+        }
+        if (!gungu.isBlank() && !addr1.contains(gungu)) {
+            return false;
+        }
+        if (sido.isBlank()) {
+            return true;
+        }
+        if (addr1.contains(sido)) {
+            return true;
+        }
+        String sidoShort = shortenSido(sido);
+        return !sidoShort.isBlank() && addr1.contains(sidoShort);
     }
 
     private static Map<String, String> fetchDetailCommon(String contentId) throws Exception {
@@ -919,7 +956,7 @@ public class HiddenGemServer {
     }
 
     private static String lookupThumbnailFromApi(String resNm, String sido) throws Exception {
-        for (String keyword : thumbnailSearchKeywords(resNm)) {
+        for (String keyword : thumbnailSearchKeywords(resNm, sido, "")) {
             try {
                 String found = searchThumbnail(keyword, resNm, sido);
                 if (found != null) {
@@ -933,15 +970,27 @@ public class HiddenGemServer {
     }
 
     /**
-     * 검색 폴백: 원본 → 공백제거 → 핵심어(접두 지역명 제거·토큰) → 별칭.
+     * 검색 폴백: 원본 → 지역+이름 → 공백제거 → 핵심어 → 별칭.
      */
-    private static List<String> thumbnailSearchKeywords(String resNm) {
+    private static List<String> thumbnailSearchKeywords(String resNm, String sido, String gungu) {
         LinkedHashSet<String> keys = new LinkedHashSet<>();
         if (resNm == null || resNm.isBlank()) {
             return List.of();
         }
         String trimmed = resNm.trim();
         keys.add(trimmed);
+
+        if (!gungu.isBlank()) {
+            keys.add(gungu + " " + trimmed);
+            keys.add(compactName(gungu + trimmed));
+        }
+        if (!sido.isBlank()) {
+            keys.add(sido + " " + trimmed);
+            String shortSido = shortenSido(sido);
+            if (!shortSido.isBlank() && !shortSido.equals(sido)) {
+                keys.add(shortSido + " " + trimmed);
+            }
+        }
 
         String compact = compactName(trimmed);
         if (!compact.isBlank()) {
@@ -955,13 +1004,18 @@ public class HiddenGemServer {
             if (!strippedCompact.isBlank()) {
                 keys.add(strippedCompact);
             }
+            if (!gungu.isBlank()) {
+                keys.add(gungu + " " + stripped);
+            }
         }
 
         for (String token : splitNameTokens(trimmed)) {
             keys.add(token);
+            if (!gungu.isBlank()) {
+                keys.add(gungu + " " + token);
+            }
         }
 
-        // 별칭은 지금까지 모은 키 기준으로 추가
         List<String> snapshot = new ArrayList<>(keys);
         for (String key : snapshot) {
             List<String> aliases = THUMB_ALIASES.get(compactName(key));
@@ -972,7 +1026,7 @@ public class HiddenGemServer {
 
         List<String> out = new ArrayList<>();
         for (String key : keys) {
-            if (key != null && !key.isBlank() && out.size() < 10) {
+            if (key != null && !key.isBlank() && out.size() < 12) {
                 out.add(key);
             }
         }
@@ -1028,9 +1082,11 @@ public class HiddenGemServer {
     private static String pickImageFromSearch(Document doc, String originalName, String keyword, String sido)
             throws Exception {
         NodeList items = doc.getElementsByTagName("item");
-        String titleMatch = null;
+        String titleAndRegion = null;
+        String anyInRegion = null;
+        String titleOnly = null;
         String anyImage = null;
-        String sidoShort = shortenSido(sido);
+        boolean requireRegion = !sido.isBlank();
 
         for (int i = 0; i < items.getLength(); i++) {
             Element item = (Element) items.item(i);
@@ -1048,17 +1104,24 @@ public class HiddenGemServer {
                 anyImage = img;
             }
             boolean nameMatch = namesMatch(title, originalName) || namesMatch(title, keyword);
-            boolean regionMatch = sido.isBlank()
-                    || addr1.contains(sido)
-                    || (!sidoShort.isBlank() && addr1.contains(sidoShort));
+            boolean regionMatch = regionMatches(addr1, sido, "");
+            if (regionMatch && anyInRegion == null) {
+                anyInRegion = img;
+            }
             if (nameMatch && regionMatch) {
                 return img;
             }
-            if (nameMatch && titleMatch == null) {
-                titleMatch = img;
+            if (nameMatch && titleAndRegion == null && regionMatch) {
+                titleAndRegion = img;
+            }
+            if (nameMatch && titleOnly == null) {
+                titleOnly = img;
             }
         }
-        return titleMatch != null ? titleMatch : anyImage;
+        if (requireRegion) {
+            return titleAndRegion;
+        }
+        return titleOnly != null ? titleOnly : anyImage;
     }
 
     /** 띄어쓰기 무시 이름 비교 */

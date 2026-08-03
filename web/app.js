@@ -1,4 +1,5 @@
 const sortSelect = document.getElementById("sort");
+const sidoSelect = document.getElementById("sidoSelect");
 const statusEl = document.getElementById("status");
 const resultsEl = document.getElementById("results");
 const writeBtn = document.getElementById("writeBtn");
@@ -35,6 +36,14 @@ let boardPosts = [];
 /** @type {object|null} */
 let currentDetail = null;
 let activeTab = "ai";
+/** @type {Map<string, object>} */
+const placeDetailCache = new Map();
+/** @type {Map<string, Promise<object>>} */
+const placeDetailInflight = new Map();
+/** 상세 미리받기가 한 번에 TourAPI를 너무 치지 않도록 */
+const PLACE_PREFETCH_CONCURRENCY = 2;
+/** @type {{ sido: string[] } | null} */
+let regionData = null;
 
 function gemKey(gem) {
   return `${gem.resNm}|${gem.sido || ""}`;
@@ -110,7 +119,6 @@ function renderGems(gems) {
           <div class="post-body">
             <h2 class="post-title">${escapeHtml(gem.resNm)}</h2>
             <p class="post-meta">${escapeHtml(location)} · 외국인 ${formatNum(gem.foreignVisitors)} · 내국인 ${formatNum(gem.domesticVisitors)}</p>
-            <span class="post-badge">히든젬 +${Math.round(gem.gemScore)}</span>
           </div>
         </li>`;
     })
@@ -150,11 +158,65 @@ async function loadThumbnails(gems) {
   }
 }
 
+/**
+ * 소개·이용정보·근처 맛집/관광지를 백그라운드로 미리 받아 클릭 즉시 표시.
+ */
+async function fetchPlaceDetail(gem) {
+  const key = gemKey(gem);
+  if (placeDetailCache.has(key)) {
+    return placeDetailCache.get(key);
+  }
+  if (placeDetailInflight.has(key)) {
+    return placeDetailInflight.get(key);
+  }
+  const request = (async () => {
+    const params = new URLSearchParams({
+      resNm: gem.resNm || "",
+      sido: gem.sido || "",
+      gungu: gem.gungu || "",
+    });
+    const res = await fetch(`/api/place-detail?${params}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "상세 조회 실패");
+    placeDetailCache.set(key, data);
+    return data;
+  })().finally(() => {
+    placeDetailInflight.delete(key);
+  });
+  placeDetailInflight.set(key, request);
+  return request;
+}
+
+async function prefetchPlaceDetails(gems) {
+  if (!gems.length) return;
+  const queue = gems.filter((g) => !placeDetailCache.has(gemKey(g)));
+  if (!queue.length) return;
+
+  const worker = async () => {
+    while (queue.length) {
+      const gem = queue.shift();
+      if (!gem) break;
+      try {
+        await fetchPlaceDetail(gem);
+      } catch {
+        /* 개별 실패는 클릭 시 재시도 */
+      }
+    }
+  };
+
+  const n = Math.min(PLACE_PREFETCH_CONCURRENCY, queue.length);
+  await Promise.all(Array.from({ length: n }, () => worker()));
+}
+
 async function loadHiddenGems() {
   showStatus(statusEl, "AI 추천 목록을 불러오는 중…", "info");
   resultsEl.innerHTML = "";
+  placeDetailCache.clear();
+  placeDetailInflight.clear();
 
   const params = new URLSearchParams({ ym: DEFAULT_YM, limit: DEFAULT_LIMIT });
+  const sido = sidoSelect?.value || "";
+  if (sido) params.set("sido", sido);
 
   try {
     const res = await fetch(`/api/hidden-gems?${params}`);
@@ -164,26 +226,59 @@ async function loadHiddenGems() {
     currentGems = data.gems || [];
     hideStatus(statusEl);
     renderGems(currentGems);
-    loadThumbnails(currentGems);
+    if (!currentGems.length) {
+      resultsEl.innerHTML = "";
+      const li = document.createElement("li");
+      li.className = "empty-state";
+      li.textContent = sido
+        ? "이 지역에 해당하는 추천 장소가 없습니다."
+        : "추천 장소가 없습니다.";
+      resultsEl.appendChild(li);
+      return;
+    }
+    await loadThumbnails(currentGems);
+    prefetchPlaceDetails(currentGems);
   } catch (e) {
     showStatus(statusEl, e.message || "오류가 발생했습니다.", "error");
   }
 }
 
-async function openPlaceDetail(gem) {
-  placeBody.innerHTML = `<div class="place-loading">관광 정보를 불러오는 중…</div>`;
-  placeDialog.showModal();
+async function loadRegions() {
+  try {
+    const res = await fetch(`/api/regions?ym=${encodeURIComponent(DEFAULT_YM)}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "지역 목록 실패");
+    regionData = { sido: data.sido || [] };
+    sidoSelect.innerHTML = `<option value="">전국</option>`;
+    for (const s of regionData.sido) {
+      const opt = document.createElement("option");
+      opt.value = s;
+      opt.textContent = s;
+      sidoSelect.appendChild(opt);
+    }
+  } catch {
+    /* 지역 필터 없이도 전국 목록은 동작 */
+  }
+}
 
-  const params = new URLSearchParams({
-    resNm: gem.resNm || "",
-    sido: gem.sido || "",
-  });
+async function openPlaceDetail(gem) {
+  placeDialog.showModal();
+  const key = gemKey(gem);
+  const cached = placeDetailCache.get(key);
+
+  if (cached) {
+    renderPlaceDetail(gem, cached);
+    return;
+  }
+
+  placeBody.innerHTML = `<div class="place-loading">관광 정보를 불러오는 중…</div>`;
 
   try {
-    const res = await fetch(`/api/place-detail?${params}`);
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "상세 조회 실패");
-    renderPlaceDetail(gem, data);
+    const data = await fetchPlaceDetail(gem);
+    // 미리받기가 끝난 뒤에도 같은 항목이면 바로 표시
+    if (gemKey(gem) === key) {
+      renderPlaceDetail(gem, data);
+    }
   } catch (e) {
     placeBody.innerHTML = `<div class="place-empty">${escapeHtml(e.message || "불러오지 못했습니다.")}</div>`;
   }
@@ -225,7 +320,6 @@ function renderPlaceDetail(gem, data) {
           <p class="place-kicker">${escapeHtml(location || "위치 미상")}</p>
           <h2 class="place-title">${escapeHtml(gem.resNm)}</h2>
           <div class="place-stats">
-            <span class="place-chip accent">히든젬 +${Math.round(gem.gemScore)}</span>
             <span class="place-chip">외국인 ${formatNum(gem.foreignVisitors)}</span>
             <span class="place-chip">내국인 ${formatNum(gem.domesticVisitors)}</span>
           </div>
@@ -262,7 +356,6 @@ function renderPlaceDetail(gem, data) {
         <p class="place-kicker">${escapeHtml(data.addr || location || "")}</p>
         <h2 class="place-title">${escapeHtml(title)}</h2>
         <div class="place-stats">
-          <span class="place-chip accent">히든젬 +${Math.round(gem.gemScore)}</span>
           <span class="place-chip">외국인 ${formatNum(gem.foreignVisitors)}</span>
           <span class="place-chip">내국인 ${formatNum(gem.domesticVisitors)}</span>
         </div>
@@ -324,52 +417,57 @@ function boardThumb(post) {
   return `<span class="thumb-letter">${escapeHtml(letter)}</span>`;
 }
 
-function renderBoardLists() {
-  for (const id of ["boardListDomestic", "boardListForeign"]) {
-    const el = document.getElementById(id);
-    if (!boardPosts.length) {
-      el.innerHTML = `<li class="empty-state">아직 게시글이 없습니다. 글쓰기로 첫 글을 남겨 보세요.</li>`;
-      continue;
-    }
-    el.innerHTML = boardPosts
-      .map((p) => {
-        const title = p.locationTitle || "장소 미정";
-        const preview = (p.content || "").replace(/\s+/g, " ").slice(0, 80);
-        return `
-          <li class="post-item board-item" data-post-id="${p.postId}">
-            <div class="post-thumb" aria-hidden="true">${boardThumb(p)}</div>
-            <div class="post-body">
-              <h2 class="post-title">${escapeHtml(title)}</h2>
-              <p class="post-meta">${escapeHtml(p.nickname || p.memberId)} · 추천 ${p.recommendCount} · 댓글 ${p.replyCount}</p>
-              <p class="post-meta">${escapeHtml(preview)}</p>
-            </div>
-          </li>`;
-      })
-      .join("");
-  }
+function boardCategoryForTab(tabId) {
+  return tabId === "foreign" ? "FOREIGN" : "DOMESTIC";
+}
 
-  document.querySelectorAll(".board-item").forEach((li) => {
+function renderBoardList(listEl, posts) {
+  if (!posts.length) {
+    listEl.innerHTML = `<li class="empty-state">아직 게시글이 없습니다. 글쓰기로 첫 글을 남겨 보세요.</li>`;
+    return;
+  }
+  listEl.innerHTML = posts
+    .map((p) => {
+      const title = p.locationTitle || "장소 미정";
+      const preview = (p.content || "").replace(/\s+/g, " ").slice(0, 80);
+      return `
+        <li class="post-item board-item" data-post-id="${p.postId}">
+          <div class="post-thumb" aria-hidden="true">${boardThumb(p)}</div>
+          <div class="post-body">
+            <h2 class="post-title">${escapeHtml(title)}</h2>
+            <p class="post-meta">${escapeHtml(p.nickname || p.memberId)} · 추천 ${p.recommendCount} · 댓글 ${p.replyCount}</p>
+            <p class="post-meta">${escapeHtml(preview)}</p>
+          </div>
+        </li>`;
+    })
+    .join("");
+
+  listEl.querySelectorAll(".board-item").forEach((li) => {
     li.addEventListener("click", () => openDetail(Number(li.dataset.postId)));
   });
 }
 
-async function loadBoardPosts() {
-  const statusIds = ["boardStatusDomestic", "boardStatusForeign"];
-  for (const id of statusIds) {
-    showStatus(document.getElementById(id), "게시글을 불러오는 중…", "info");
-  }
-  const qs = `?memberId=${encodeURIComponent(DEFAULT_MEMBER_ID)}`;
+async function loadBoardPosts(tabId = activeTab) {
+  const category = boardCategoryForTab(tabId);
+  const statusId = category === "FOREIGN" ? "boardStatusForeign" : "boardStatusDomestic";
+  const listId = category === "FOREIGN" ? "boardListForeign" : "boardListDomestic";
+  const statusElBoard = document.getElementById(statusId);
+  const listEl = document.getElementById(listId);
+
+  showStatus(statusElBoard, "게시글을 불러오는 중…", "info");
+  const qs = new URLSearchParams({
+    memberId: DEFAULT_MEMBER_ID,
+    category,
+  });
   try {
-    const res = await fetch(`/api/posts${qs}`);
+    const res = await fetch(`/api/posts?${qs}`);
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "게시글 조회 실패");
     boardPosts = data.posts || [];
-    for (const id of statusIds) hideStatus(document.getElementById(id));
-    renderBoardLists();
+    hideStatus(statusElBoard);
+    renderBoardList(listEl, boardPosts);
   } catch (e) {
-    for (const id of statusIds) {
-      showStatus(document.getElementById(id), e.message || "오류", "error");
-    }
+    showStatus(statusElBoard, e.message || "오류", "error");
   }
 }
 
@@ -435,7 +533,7 @@ function switchTab(tabId) {
     panel.hidden = !isActive;
   });
   if (tabId === "domestic" || tabId === "foreign") {
-    loadBoardPosts();
+    loadBoardPosts(tabId);
   }
 }
 
@@ -447,8 +545,16 @@ sortSelect.addEventListener("change", () => {
   if (currentGems.length) renderGems(currentGems);
 });
 
+sidoSelect.addEventListener("change", () => {
+  loadHiddenGems();
+});
+
 writeBtn.addEventListener("click", () => {
   writeError.hidden = true;
+  const cat = document.getElementById("writeCategory");
+  if (cat) {
+    cat.value = activeTab === "foreign" ? "FOREIGN" : "DOMESTIC";
+  }
   writeDialog.showModal();
 });
 
@@ -460,11 +566,13 @@ writeForm.addEventListener("submit", async (e) => {
   }
   e.preventDefault();
   writeError.hidden = true;
+  const category = document.getElementById("writeCategory")?.value || "DOMESTIC";
   const payload = {
     memberId: DEFAULT_MEMBER_ID,
     locationTitle: document.getElementById("writeLocation").value.trim(),
     address: document.getElementById("writeAddress").value.trim(),
     content: document.getElementById("writeContent").value.trim(),
+    category,
   };
   try {
     const res = await fetch("/api/posts", {
@@ -476,8 +584,9 @@ writeForm.addEventListener("submit", async (e) => {
     if (!res.ok) throw new Error(data.error || "등록 실패");
     writeDialog.close();
     writeForm.reset();
-    if (activeTab === "ai") switchTab("domestic");
-    else await loadBoardPosts();
+    const targetTab = category === "FOREIGN" ? "foreign" : "domestic";
+    if (activeTab !== targetTab) switchTab(targetTab);
+    else await loadBoardPosts(targetTab);
     if (data.postId) openDetail(data.postId);
   } catch (err) {
     writeError.hidden = false;
@@ -515,7 +624,7 @@ recommendBtn.addEventListener("click", async () => {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "추천 실패");
     await openDetail(currentDetail.postId);
-    loadBoardPosts();
+    loadBoardPosts(activeTab);
   } catch (err) {
     alert(err.message || "추천 실패");
   }
@@ -536,10 +645,10 @@ replyForm.addEventListener("submit", async (e) => {
     if (!res.ok) throw new Error(data.error || "댓글 등록 실패");
     replyInput.value = "";
     await openDetail(currentDetail.postId);
-    loadBoardPosts();
+    loadBoardPosts(activeTab);
   } catch (err) {
     alert(err.message || "댓글 등록 실패");
   }
 });
 
-loadHiddenGems();
+loadRegions().then(() => loadHiddenGems());

@@ -22,6 +22,12 @@
     <!-- AI 추천 패널 -->
     <section id="panel-ai" class="panel active" role="tabpanel">
       <div class="panel-toolbar">
+        <div class="region-wrap">
+          <label for="sidoSelect">지역</label>
+          <select id="sidoSelect">
+            <option value="">전국</option>
+          </select>
+        </div>
         <div class="sort-wrap">
           <label for="sort">정렬</label>
           <select id="sort">
@@ -39,32 +45,34 @@
     <!-- 내국인 추천 = DB Post 목록 -->
     <section id="panel-domestic" class="panel" role="tabpanel" hidden>
       <div class="panel-toolbar">
-        <p class="panel-hint">커뮤니티 게시글</p>
+        <p class="panel-hint">내국인 추천 게시글</p>
       </div>
       <div id="boardStatusDomestic" class="status" hidden></div>
       <ul id="boardListDomestic" class="post-list"></ul>
     </section>
 
-    <!-- 외국인 추천 = 동일 DB Post 목록 -->
+    <!-- 외국인 추천 -->
     <section id="panel-foreign" class="panel" role="tabpanel" hidden>
       <div class="panel-toolbar">
-        <p class="panel-hint">커뮤니티 게시글</p>
+        <p class="panel-hint">외국인 추천 게시글</p>
       </div>
       <div id="boardStatusForeign" class="status" hidden></div>
       <ul id="boardListForeign" class="post-list"></ul>
     </section>
 
     <button type="button" id="writeBtn" class="fab" title="글쓰기">글쓰기</button>
-
-    <footer class="footer">
-      <p>데이터: 한국문화관광연구원 관광자원통계서비스 · 게시판: MySQL</p>
-    </footer>
   </div>
 
   <!-- 글쓰기 -->
   <dialog id="writeDialog" class="modal">
     <form method="dialog" id="writeForm" class="modal-card">
       <h2>글쓰기</h2>
+      <label>게시판
+        <select id="writeCategory" name="category">
+          <option value="DOMESTIC">내국인 추천</option>
+          <option value="FOREIGN">외국인 추천</option>
+        </select>
+      </label>
       <label>장소명<input id="writeLocation" name="locationTitle" placeholder="예: 부산시립미술관"></label>
       <label>주소<input id="writeAddress" name="address" placeholder="선택"></label>
       <label>내용<textarea id="writeContent" name="content" rows="5" required placeholder="방문 후기나 추천 이유를 적어 주세요."></textarea></label>

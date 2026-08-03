@@ -108,8 +108,10 @@ public final class BoardApi {
     }
 
     private static void listPosts(HttpExchange ex) throws Exception {
-        String viewer = query(ex.getRequestURI()).getOrDefault("memberId", "");
-        List<Map<String, Object>> posts = BoardDb.listPosts(viewer);
+        Map<String, String> qmap = query(ex.getRequestURI());
+        String viewer = qmap.getOrDefault("memberId", "");
+        String category = qmap.getOrDefault("category", "DOMESTIC");
+        List<Map<String, Object>> posts = BoardDb.listPosts(viewer, category);
         StringBuilder sb = new StringBuilder("{\"posts\":[");
         for (int i = 0; i < posts.size(); i++) {
             if (i > 0) {
@@ -137,7 +139,8 @@ public final class BoardApi {
                 body.get("memberId"),
                 body.get("content"),
                 body.get("locationTitle"),
-                body.get("address"));
+                body.get("address"),
+                body.get("category"));
         json(ex, 201, "{\"postId\":" + id + "}");
     }
 
@@ -161,6 +164,7 @@ public final class BoardApi {
                 .append(",\"memberId\":").append(q(str(post.get("memberId"))))
                 .append(",\"nickname\":").append(q(str(post.get("nickname"))))
                 .append(",\"content\":").append(q(str(post.get("content"))))
+                .append(",\"category\":").append(q(str(post.get("category"))))
                 .append(",\"regDate\":").append(q(str(post.get("regDate"))))
                 .append(",\"locationId\":").append(post.get("locationId") == null ? "null" : post.get("locationId"))
                 .append(",\"locationTitle\":").append(q(str(post.get("locationTitle"))))

@@ -20,6 +20,7 @@ import java.util.Properties;
 public final class BoardDb {
 
     private static final Path DB_PROPERTIES = Path.of("db.properties");
+    private static volatile boolean schemaReady = false;
 
     private BoardDb() {
     }
@@ -27,7 +28,32 @@ public final class BoardDb {
     public static Connection open() throws Exception {
         Class.forName("com.mysql.cj.jdbc.Driver");
         DbConfig cfg = DbConfig.load();
-        return DriverManager.getConnection(cfg.jdbcUrl, cfg.username, cfg.password);
+        Connection conn = DriverManager.getConnection(cfg.jdbcUrl, cfg.username, cfg.password);
+        ensureSchema(conn);
+        return conn;
+    }
+
+    /** Post.category 컬럼이 없으면 추가 (내국인/외국인 분리) */
+    private static void ensureSchema(Connection conn) {
+        if (schemaReady) {
+            return;
+        }
+        synchronized (BoardDb.class) {
+            if (schemaReady) {
+                return;
+            }
+            try (Statement st = conn.createStatement()) {
+                st.executeUpdate(
+                        "ALTER TABLE Post ADD COLUMN category VARCHAR(20) NOT NULL DEFAULT 'DOMESTIC'");
+            } catch (SQLException e) {
+                // 이미 있으면 무시 (MySQL 1060 duplicate column)
+                String msg = e.getMessage() == null ? "" : e.getMessage().toLowerCase();
+                if (!(e.getErrorCode() == 1060 || msg.contains("duplicate"))) {
+                    System.err.println("Post.category 확인: " + e.getMessage());
+                }
+            }
+            schemaReady = true;
+        }
     }
 
     public static Map<String, String> login(String memberId, String password) throws Exception {
@@ -48,9 +74,10 @@ public final class BoardDb {
         }
     }
 
-    public static List<Map<String, Object>> listPosts(String viewerId) throws Exception {
+    public static List<Map<String, Object>> listPosts(String viewerId, String category) throws Exception {
+        String cat = normalizeCategory(category);
         String sql = """
-                SELECT p.post_id, p.member_id, p.content, p.reg_date,
+                SELECT p.post_id, p.member_id, p.content, p.reg_date, p.category,
                        m.nickname,
                        l.location_id, l.title AS location_title, l.address, l.image_url,
                        (SELECT COUNT(*) FROM Recommendation r WHERE r.post_id = p.post_id) AS recommend_count,
@@ -58,18 +85,21 @@ public final class BoardDb {
                 FROM Post p
                 JOIN Member m ON m.member_id = p.member_id
                 LEFT JOIN Location l ON l.location_id = p.location_id
+                WHERE p.category = ?
                 ORDER BY p.reg_date DESC, p.post_id DESC
                 """;
         List<Map<String, Object>> list = new ArrayList<>();
         try (Connection conn = open();
-             PreparedStatement ps = conn.prepareStatement(sql);
-             ResultSet rs = ps.executeQuery()) {
-            while (rs.next()) {
-                Map<String, Object> row = postRow(rs);
-                long postId = ((Number) row.get("postId")).longValue();
-                row.put("recommended", viewerId != null && !viewerId.isBlank()
-                        && hasRecommendation(conn, viewerId, postId));
-                list.add(row);
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, cat);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    Map<String, Object> row = postRow(rs);
+                    long postId = ((Number) row.get("postId")).longValue();
+                    row.put("recommended", viewerId != null && !viewerId.isBlank()
+                            && hasRecommendation(conn, viewerId, postId));
+                    list.add(row);
+                }
             }
         }
         return list;
@@ -77,7 +107,7 @@ public final class BoardDb {
 
     public static Map<String, Object> getPost(long postId, String viewerId) throws Exception {
         String sql = """
-                SELECT p.post_id, p.member_id, p.content, p.reg_date,
+                SELECT p.post_id, p.member_id, p.content, p.reg_date, p.category,
                        m.nickname,
                        l.location_id, l.title AS location_title, l.address, l.image_url,
                        (SELECT COUNT(*) FROM Recommendation r WHERE r.post_id = p.post_id) AS recommend_count,
@@ -103,7 +133,8 @@ public final class BoardDb {
         }
     }
 
-    public static long createPost(String memberId, String content, String locationTitle, String address)
+    public static long createPost(
+            String memberId, String content, String locationTitle, String address, String category)
             throws Exception {
         if (memberId == null || memberId.isBlank()) {
             throw new IllegalArgumentException("memberId가 필요합니다.");
@@ -111,6 +142,7 @@ public final class BoardDb {
         if (content == null || content.isBlank()) {
             throw new IllegalArgumentException("내용을 입력하세요.");
         }
+        String cat = normalizeCategory(category);
         try (Connection conn = open()) {
             conn.setAutoCommit(false);
             try {
@@ -121,11 +153,12 @@ public final class BoardDb {
                         address == null ? "" : address.trim());
                 long postId;
                 try (PreparedStatement ps = conn.prepareStatement(
-                        "INSERT INTO Post (member_id, location_id, content) VALUES (?, ?, ?)",
+                        "INSERT INTO Post (member_id, location_id, content, category) VALUES (?, ?, ?, ?)",
                         Statement.RETURN_GENERATED_KEYS)) {
                     ps.setString(1, memberId);
                     ps.setLong(2, locationId);
                     ps.setString(3, content.trim());
+                    ps.setString(4, cat);
                     ps.executeUpdate();
                     try (ResultSet keys = ps.getGeneratedKeys()) {
                         if (!keys.next()) {
@@ -231,6 +264,7 @@ public final class BoardDb {
         row.put("memberId", rs.getString("member_id"));
         row.put("nickname", nullToEmpty(rs.getString("nickname")));
         row.put("content", nullToEmpty(rs.getString("content")));
+        row.put("category", normalizeCategory(rs.getString("category")));
         row.put("regDate", String.valueOf(rs.getTimestamp("reg_date")));
         long locId = rs.getLong("location_id");
         row.put("locationId", rs.wasNull() ? null : locId);
@@ -240,6 +274,13 @@ public final class BoardDb {
         row.put("recommendCount", rs.getLong("recommend_count"));
         row.put("replyCount", rs.getLong("reply_count"));
         return row;
+    }
+
+    private static String normalizeCategory(String category) {
+        if (category != null && "FOREIGN".equalsIgnoreCase(category.trim())) {
+            return "FOREIGN";
+        }
+        return "DOMESTIC";
     }
 
     private static boolean hasRecommendation(Connection conn, String memberId, long postId) throws SQLException {
