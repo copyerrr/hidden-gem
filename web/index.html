@@ -14,8 +14,9 @@
     <header class="top-bar">
       <nav class="tabs" role="tablist">
         <button type="button" class="tab active" data-tab="ai" role="tab" aria-selected="true">AI 추천</button>
-        <button type="button" class="tab" data-tab="domestic" role="tab" aria-selected="false">내국인 추천</button>
-        <button type="button" class="tab" data-tab="foreign" role="tab" aria-selected="false">외국인 추천</button>
+        <button type="button" class="tab" data-tab="domestic" role="tab" aria-selected="false">내국인</button>
+        <button type="button" class="tab" data-tab="foreign" role="tab" aria-selected="false">외국인</button>
+        <button type="button" class="tab" data-tab="my" role="tab" aria-selected="false">마이</button>
       </nav>
       <div class="auth-bar">
         <span id="authLabel" class="auth-label">로그인이 필요합니다</span>
@@ -47,22 +48,33 @@
       <ul id="results" class="post-list"></ul>
     </section>
 
-    <!-- 내국인 추천 = DB Post 목록 -->
+    <!-- 내국인 추천 = DB Post 피드 -->
     <section id="panel-domestic" class="panel" role="tabpanel" hidden>
-      <div class="panel-toolbar">
-        <p class="panel-hint">내국인 추천 게시글</p>
-      </div>
       <div id="boardStatusDomestic" class="status" hidden></div>
-      <ul id="boardListDomestic" class="post-list"></ul>
+      <ul id="boardListDomestic" class="thread-feed"></ul>
     </section>
 
     <!-- 외국인 추천 -->
     <section id="panel-foreign" class="panel" role="tabpanel" hidden>
-      <div class="panel-toolbar">
-        <p class="panel-hint">외국인 추천 게시글</p>
-      </div>
       <div id="boardStatusForeign" class="status" hidden></div>
-      <ul id="boardListForeign" class="post-list"></ul>
+      <ul id="boardListForeign" class="thread-feed"></ul>
+    </section>
+
+    <!-- 마이페이지 -->
+    <section id="panel-my" class="panel" role="tabpanel" hidden>
+      <div class="my-header">
+        <div class="my-avatar" id="myAvatar" aria-hidden="true">?</div>
+        <div class="my-info">
+          <p class="my-name" id="myName">게스트</p>
+          <p class="my-sub" id="mySub">로그인하면 내 글·추천 목록을 볼 수 있어요</p>
+        </div>
+      </div>
+      <div class="my-subtabs" role="tablist">
+        <button type="button" class="my-subtab active" data-my-view="posts">내가 쓴 글</button>
+        <button type="button" class="my-subtab" data-my-view="liked">추천한 글</button>
+      </div>
+      <div id="boardStatusMy" class="status" hidden></div>
+      <ul id="boardListMy" class="thread-feed"></ul>
     </section>
 
     <button type="button" id="writeBtn" class="fab" title="글쓰기">글쓰기</button>

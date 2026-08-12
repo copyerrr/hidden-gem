@@ -8,6 +8,9 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.sql.Timestamp;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -20,6 +23,9 @@ import java.util.Properties;
 public final class BoardDb {
 
     private static final Path DB_PROPERTIES = Path.of("db.properties");
+    private static final ZoneId KST = ZoneId.of("Asia/Seoul");
+    private static final DateTimeFormatter REG_DATE_FMT =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ssXXX");
     private static volatile boolean schemaReady = false;
 
     private BoardDb() {
@@ -112,24 +118,62 @@ public final class BoardDb {
         }
     }
 
+    private static final String POST_SELECT = """
+            SELECT p.post_id, p.member_id, p.content, p.reg_date, p.category,
+                   m.nickname,
+                   l.location_id, l.title AS location_title, l.address, l.image_url,
+                   (SELECT COUNT(*) FROM Recommendation r WHERE r.post_id = p.post_id) AS recommend_count,
+                   (SELECT COUNT(*) FROM Reply rp WHERE rp.post_id = p.post_id) AS reply_count
+            FROM Post p
+            JOIN Member m ON m.member_id = p.member_id
+            LEFT JOIN Location l ON l.location_id = p.location_id
+            """;
+
     public static List<Map<String, Object>> listPosts(String viewerId, String category) throws Exception {
         String cat = normalizeCategory(category);
-        String sql = """
-                SELECT p.post_id, p.member_id, p.content, p.reg_date, p.category,
-                       m.nickname,
-                       l.location_id, l.title AS location_title, l.address, l.image_url,
-                       (SELECT COUNT(*) FROM Recommendation r WHERE r.post_id = p.post_id) AS recommend_count,
-                       (SELECT COUNT(*) FROM Reply rp WHERE rp.post_id = p.post_id) AS reply_count
-                FROM Post p
-                JOIN Member m ON m.member_id = p.member_id
-                LEFT JOIN Location l ON l.location_id = p.location_id
+        String sql = POST_SELECT + """
                 WHERE p.category = ?
                 ORDER BY p.reg_date DESC, p.post_id DESC
                 """;
+        return queryPosts(sql, viewerId, ps -> ps.setString(1, cat));
+    }
+
+    /** 특정 회원이 쓴 글 */
+    public static List<Map<String, Object>> listPostsByAuthor(String viewerId, String authorId) throws Exception {
+        if (authorId == null || authorId.isBlank()) {
+            throw new IllegalArgumentException("작성자 아이디가 필요합니다.");
+        }
+        String sql = POST_SELECT + """
+                WHERE p.member_id = ?
+                ORDER BY p.reg_date DESC, p.post_id DESC
+                """;
+        return queryPosts(sql, viewerId, ps -> ps.setString(1, authorId.trim()));
+    }
+
+    /** 특정 회원이 추천한 글 */
+    public static List<Map<String, Object>> listRecommendedPosts(String viewerId, String likerId) throws Exception {
+        if (likerId == null || likerId.isBlank()) {
+            throw new IllegalArgumentException("회원 아이디가 필요합니다.");
+        }
+        String sql = POST_SELECT + """
+                JOIN Recommendation rec ON rec.post_id = p.post_id
+                WHERE rec.member_id = ?
+                ORDER BY p.reg_date DESC, p.post_id DESC
+                """;
+        return queryPosts(sql, viewerId, ps -> ps.setString(1, likerId.trim()));
+    }
+
+    @FunctionalInterface
+    private interface PsBinder {
+        void bind(PreparedStatement ps) throws SQLException;
+    }
+
+    private static List<Map<String, Object>> queryPosts(String sql, String viewerId, PsBinder binder)
+            throws Exception {
         List<Map<String, Object>> list = new ArrayList<>();
         try (Connection conn = open();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setString(1, cat);
+            binder.bind(ps);
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
                     Map<String, Object> row = postRow(rs);
@@ -144,17 +188,7 @@ public final class BoardDb {
     }
 
     public static Map<String, Object> getPost(long postId, String viewerId) throws Exception {
-        String sql = """
-                SELECT p.post_id, p.member_id, p.content, p.reg_date, p.category,
-                       m.nickname,
-                       l.location_id, l.title AS location_title, l.address, l.image_url,
-                       (SELECT COUNT(*) FROM Recommendation r WHERE r.post_id = p.post_id) AS recommend_count,
-                       (SELECT COUNT(*) FROM Reply rp WHERE rp.post_id = p.post_id) AS reply_count
-                FROM Post p
-                JOIN Member m ON m.member_id = p.member_id
-                LEFT JOIN Location l ON l.location_id = p.location_id
-                WHERE p.post_id = ?
-                """;
+        String sql = POST_SELECT + " WHERE p.post_id = ? ";
         try (Connection conn = open();
              PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setLong(1, postId);
@@ -423,7 +457,7 @@ public final class BoardDb {
                     row.put("memberId", rs.getString("member_id"));
                     row.put("nickname", nullToEmpty(rs.getString("nickname")));
                     row.put("content", nullToEmpty(rs.getString("reply_content")));
-                    row.put("regDate", String.valueOf(rs.getTimestamp("reg_date")));
+                    row.put("regDate", formatRegDate(rs.getTimestamp("reg_date")));
                     list.add(row);
                 }
             }
@@ -438,7 +472,7 @@ public final class BoardDb {
         row.put("nickname", nullToEmpty(rs.getString("nickname")));
         row.put("content", nullToEmpty(rs.getString("content")));
         row.put("category", normalizeCategory(rs.getString("category")));
-        row.put("regDate", String.valueOf(rs.getTimestamp("reg_date")));
+        row.put("regDate", formatRegDate(rs.getTimestamp("reg_date")));
         long locId = rs.getLong("location_id");
         row.put("locationId", rs.wasNull() ? null : locId);
         row.put("locationTitle", nullToEmpty(rs.getString("location_title")));
@@ -447,6 +481,14 @@ public final class BoardDb {
         row.put("recommendCount", rs.getLong("recommend_count"));
         row.put("replyCount", rs.getLong("reply_count"));
         return row;
+    }
+
+    /** 한국시간(+09:00) ISO 문자열 — 프론트 상대시간이 UTC로 어긋나지 않게 */
+    private static String formatRegDate(Timestamp ts) {
+        if (ts == null) {
+            return "";
+        }
+        return ts.toInstant().atZone(KST).format(REG_DATE_FMT);
     }
 
     private static String normalizeCategory(String category) {

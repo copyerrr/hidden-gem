@@ -87,13 +87,25 @@ public class HiddenGemServer {
     private static final String KOR_SERVICE_BASE = "https://apis.data.go.kr/B551011/KorService2";
     private static final Map<String, String> GEM_CACHE = new HashMap<>();
     private static final Map<String, List<Attraction>> YM_DATA_CACHE = new HashMap<>();
+    /** 썸네일/상세 검색 키워드 최대 개수 */
+    private static final int MAX_THUMB_KEYWORDS = 12;
     private static final Map<String, String> IMAGE_CACHE = new ConcurrentHashMap<>();
     private static final Map<String, String> PLACE_DETAIL_CACHE = new ConcurrentHashMap<>();
+    /** 썸네일 검색 시 확보한 contentId — 상세에서 재검색 생략용 */
+    private static final Map<String, SearchHit> CONTENT_HIT_CACHE = new ConcurrentHashMap<>();
+    /** KorService2 호출 횟수 (벤치마크용) */
+    private static final Map<String, java.util.concurrent.atomic.AtomicInteger> KOR_TRAFFIC =
+            new ConcurrentHashMap<>();
     /** 한 번에 전체 1260건을 받으면 Read timed out 나므로 페이지 단위로 받음 */
     private static final int API_PAGE_SIZE = 100;
     private static final Path CACHE_DIR = Path.of("out");
 
     public static void main(String[] args) throws Exception {
+        if (args.length > 0 && "traffic".equalsIgnoreCase(args[0])) {
+            int n = args.length > 1 ? Integer.parseInt(args[1]) : 10;
+            runTrafficCompare(n);
+            return;
+        }
         if (!Files.isDirectory(WEB_ROOT)) {
             System.err.println("web/ 폴더가 없습니다. 프로젝트 루트에서 실행하세요.");
             System.exit(1);
@@ -532,7 +544,22 @@ public class HiddenGemServer {
     }
 
     private static String buildPlaceDetailJson(String resNm, String sido, String gungu) throws Exception {
-        SearchHit hit = resolveSearchHit(resNm, sido, gungu);
+        return buildPlaceDetailJson(resNm, sido, gungu, true);
+    }
+
+    /** @param reuseContentId true면 썸네일에서 찾은 contentId 재사용 (운영 기본) */
+    private static String buildPlaceDetailJson(String resNm, String sido, String gungu, boolean reuseContentId)
+            throws Exception {
+        SearchHit hit = null;
+        if (reuseContentId) {
+            hit = CONTENT_HIT_CACHE.get(imageCacheKey(resNm, sido));
+        }
+        if (hit == null || hit.contentId == null || hit.contentId.isBlank()) {
+            hit = resolveSearchHit(resNm, sido, gungu);
+            if (hit != null && !hit.contentId.isBlank()) {
+                CONTENT_HIT_CACHE.put(imageCacheKey(resNm, sido), hit);
+            }
+        }
         if (hit == null || hit.contentId.isBlank()) {
             return "{\"found\":false,\"resNm\":" + q(resNm) + ",\"sido\":" + q(sido)
                     + ",\"message\":" + q("관광공사 DB에서 장소를 찾지 못했습니다.") + "}";
@@ -947,21 +974,24 @@ public class HiddenGemServer {
             return cached.isEmpty() ? null : cached;
         }
         try {
-            String url = lookupThumbnailFromApi(resNm, sido);
-            // 성공만 캐시 — 일시적 API 실패를 빈 값으로 고정하지 않음
-            if (url != null) {
-                IMAGE_CACHE.put(cacheKey, url);
+            SearchHit hit = lookupThumbnailHitFromApi(resNm, sido);
+            if (hit != null && hit.image != null && !hit.image.isBlank()) {
+                IMAGE_CACHE.put(cacheKey, hit.image);
+                if (hit.contentId != null && !hit.contentId.isBlank()) {
+                    CONTENT_HIT_CACHE.put(cacheKey, hit);
+                }
+                return hit.image;
             }
-            return url;
+            return null;
         } catch (Exception e) {
             return null;
         }
     }
 
-    private static String lookupThumbnailFromApi(String resNm, String sido) throws Exception {
+    private static SearchHit lookupThumbnailHitFromApi(String resNm, String sido) throws Exception {
         for (String keyword : thumbnailSearchKeywords(resNm, sido, "")) {
             try {
-                String found = searchThumbnail(keyword, resNm, sido);
+                SearchHit found = searchThumbnailHit(keyword, resNm, sido);
                 if (found != null) {
                     return found;
                 }
@@ -1029,7 +1059,7 @@ public class HiddenGemServer {
 
         List<String> out = new ArrayList<>();
         for (String key : keys) {
-            if (key != null && !key.isBlank() && out.size() < 12) {
+            if (key != null && !key.isBlank() && out.size() < MAX_THUMB_KEYWORDS) {
                 out.add(key);
             }
         }
@@ -1066,65 +1096,74 @@ public class HiddenGemServer {
     }
 
     private static String searchThumbnail(String keyword, String originalName, String sido) throws Exception {
+        SearchHit hit = searchThumbnailHit(keyword, originalName, sido);
+        return hit == null ? null : hit.image;
+    }
+
+    private static SearchHit searchThumbnailHit(String keyword, String originalName, String sido) throws Exception {
         String xml = korSearchKeyword(keyword);
         Document doc = parseXml(xml);
         checkResult(doc);
-        return pickImageFromSearch(doc, originalName, keyword, sido);
+        return pickSearchHitForThumbnail(doc, originalName, keyword, sido);
     }
 
-    private static String korSearchKeyword(String keyword) throws Exception {
-        StringBuilder url = new StringBuilder(KOR_SERVICE_BASE).append("/searchKeyword2?");
-        url.append("serviceKey=").append(enc(tourServiceKeyRaw()));
-        url.append("&numOfRows=10&pageNo=1");
-        url.append("&MobileOS=ETC&MobileApp=HiddenGem");
-        url.append("&_type=xml&arrange=A");
-        url.append("&keyword=").append(enc(keyword));
-        return httpGet(url.toString());
-    }
-
-    private static String pickImageFromSearch(Document doc, String originalName, String keyword, String sido)
-            throws Exception {
+    private static SearchHit pickSearchHitForThumbnail(
+            Document doc, String originalName, String keyword, String sido) throws Exception {
         NodeList items = doc.getElementsByTagName("item");
-        String titleAndRegion = null;
-        String anyInRegion = null;
-        String titleOnly = null;
-        String anyImage = null;
+        SearchHit titleAndRegion = null;
+        SearchHit titleOnly = null;
+        SearchHit anyWithImage = null;
         boolean requireRegion = !sido.isBlank();
 
         for (int i = 0; i < items.getLength(); i++) {
             Element item = (Element) items.item(i);
+            String contentId = childText(item, "contentid");
+            if (contentId.isBlank()) {
+                continue;
+            }
             String title = childText(item, "title");
             String addr1 = childText(item, "addr1");
-            String contentId = childText(item, "contentid");
             String img = imageFromItem(item);
-            if (img == null && !contentId.isBlank()) {
+            if (img == null) {
                 img = fetchDetailImage(contentId);
             }
             if (img == null) {
                 continue;
             }
-            if (anyImage == null) {
-                anyImage = img;
-            }
+            SearchHit hit = new SearchHit(
+                    contentId,
+                    childText(item, "contenttypeid"),
+                    title,
+                    addr1,
+                    childText(item, "mapx"),
+                    childText(item, "mapy"),
+                    img);
+
             boolean nameMatch = namesMatch(title, originalName) || namesMatch(title, keyword);
             boolean regionMatch = regionMatches(addr1, sido, "");
-            if (regionMatch && anyInRegion == null) {
-                anyInRegion = img;
+            if (anyWithImage == null) {
+                anyWithImage = hit;
             }
             if (nameMatch && regionMatch) {
-                return img;
+                return hit;
             }
             if (nameMatch && titleAndRegion == null && regionMatch) {
-                titleAndRegion = img;
+                titleAndRegion = hit;
             }
             if (nameMatch && titleOnly == null) {
-                titleOnly = img;
+                titleOnly = hit;
             }
         }
         if (requireRegion) {
             return titleAndRegion;
         }
-        return titleOnly != null ? titleOnly : anyImage;
+        return titleOnly != null ? titleOnly : anyWithImage;
+    }
+
+    private static String pickImageFromSearch(Document doc, String originalName, String keyword, String sido)
+            throws Exception {
+        SearchHit hit = pickSearchHitForThumbnail(doc, originalName, keyword, sido);
+        return hit == null ? null : hit.image;
     }
 
     /** 띄어쓰기 무시 이름 비교 */
@@ -1222,14 +1261,223 @@ public class HiddenGemServer {
         url.append(enc(key)).append('=').append(enc(value));
     }
 
+    private static String korSearchKeyword(String keyword) throws Exception {
+        StringBuilder url = new StringBuilder(KOR_SERVICE_BASE).append("/searchKeyword2?");
+        url.append("serviceKey=").append(enc(tourServiceKeyRaw()));
+        url.append("&numOfRows=10&pageNo=1");
+        url.append("&MobileOS=ETC&MobileApp=HiddenGem");
+        url.append("&_type=xml&arrange=A");
+        url.append("&keyword=").append(enc(keyword));
+        return httpGet(url.toString());
+    }
+
     private static void checkResult(Document doc) throws Exception {
         String code = firstTagText(doc, "resultCode");
         if (!code.isBlank() && !"0000".equals(code)) {
-            throw new IllegalStateException("API 오류 " + code + ": " + firstTagText(doc, "resultMsg"));
+            // OpenAPI_ServiceResponse (한도 초과 등)
+            String err = firstTagText(doc, "errMsg");
+            if (err.isBlank()) {
+                err = firstTagText(doc, "returnAuthMsg");
+            }
+            if (err.isBlank()) {
+                err = firstTagText(doc, "resultMsg");
+            }
+            throw new IllegalStateException("API 오류 " + code + ": " + err);
+        }
+        String reason = firstTagText(doc, "returnReasonCode");
+        if ("22".equals(reason) || (!reason.isBlank() && !"0".equals(reason) && !"00".equals(reason))) {
+            throw new IllegalStateException("API 제한 " + reason + ": " + firstTagText(doc, "returnAuthMsg"));
         }
     }
 
+    private static void noteKorTraffic(String urlString) {
+        if (urlString == null || !urlString.contains("/KorService2/")) {
+            return;
+        }
+        String op = "other";
+        int idx = urlString.indexOf("/KorService2/");
+        if (idx >= 0) {
+            String rest = urlString.substring(idx + "/KorService2/".length());
+            int q = rest.indexOf('?');
+            op = q >= 0 ? rest.substring(0, q) : rest;
+        }
+        KOR_TRAFFIC.computeIfAbsent(op, k -> new java.util.concurrent.atomic.AtomicInteger())
+                .incrementAndGet();
+        KOR_TRAFFIC.computeIfAbsent("TOTAL", k -> new java.util.concurrent.atomic.AtomicInteger())
+                .incrementAndGet();
+    }
+
+    private static void resetKorTraffic() {
+        KOR_TRAFFIC.clear();
+        IMAGE_CACHE.clear();
+        PLACE_DETAIL_CACHE.clear();
+        CONTENT_HIT_CACHE.clear();
+    }
+
+    private static void resetKorTrafficCounterOnly() {
+        KOR_TRAFFIC.clear();
+    }
+
+    private static int korTotal() {
+        java.util.concurrent.atomic.AtomicInteger t = KOR_TRAFFIC.get("TOTAL");
+        return t == null ? 0 : t.get();
+    }
+
+    private static void printKorTraffic(String label) {
+        System.out.println("--- " + label + " ---");
+        System.out.println("TOTAL=" + korTotal());
+        KOR_TRAFFIC.entrySet().stream()
+                .filter(e -> !"TOTAL".equals(e.getKey()))
+                .sorted(Map.Entry.comparingByKey())
+                .forEach(e -> System.out.println("  " + e.getKey() + "=" + e.getValue().get()));
+    }
+
+    /**
+     * contentId 재사용 전/후 트래픽 비교.
+     * 실행: {@code java HiddenGemServer traffic 10}
+     */
+    private static void runTrafficCompare(int n) throws Exception {
+        System.out.println("KorService2 트래픽 비교 (썸네일+상세, 장소 " + n + "곳)");
+        String ym = defaultYm();
+        List<Attraction> all = loadYmData(ym);
+        List<HiddenGem> gems = buildGemList(all, n);
+        if (gems.isEmpty()) {
+            System.out.println("비교할 장소가 없습니다. out/ym-" + ym + ".tsv 를 확인하세요.");
+            return;
+        }
+        System.out.println("샘플:");
+        for (int i = 0; i < gems.size(); i++) {
+            HiddenGem g = gems.get(i);
+            System.out.println("  " + (i + 1) + ". " + g.resNm + " / " + g.sido);
+        }
+
+        resetKorTraffic();
+        int beforeOkThumb = 0;
+        int beforeOkDetail = 0;
+        for (HiddenGem g : gems) {
+            String thumb = lookupThumbnail(g.resNm, g.sido);
+            if (thumb != null) {
+                beforeOkThumb++;
+            }
+            String gungu = g.gungu == null ? "" : g.gungu;
+            String detail = buildPlaceDetailJson(g.resNm, g.sido, gungu, false);
+            if (detail.contains("\"found\":true")) {
+                beforeOkDetail++;
+            }
+        }
+        int beforeTotal = korTotal();
+        Map<String, Integer> beforeMap = snapshotTraffic();
+        printKorTraffic("BEFORE (재검색) thumbOk=" + beforeOkThumb + " detailOk=" + beforeOkDetail);
+
+        resetKorTraffic();
+        int afterOkThumb = 0;
+        int afterOkDetail = 0;
+        for (HiddenGem g : gems) {
+            String thumb = lookupThumbnail(g.resNm, g.sido);
+            if (thumb != null) {
+                afterOkThumb++;
+            }
+            String gungu = g.gungu == null ? "" : g.gungu;
+            String detail = buildPlaceDetailJson(g.resNm, g.sido, gungu, true);
+            if (detail.contains("\"found\":true")) {
+                afterOkDetail++;
+            }
+        }
+        int afterTotal = korTotal();
+        Map<String, Integer> afterMap = snapshotTraffic();
+        printKorTraffic("AFTER (contentId 재사용) thumbOk=" + afterOkThumb + " detailOk=" + afterOkDetail);
+
+        System.out.println("=== 비교 요약 ===");
+        System.out.println("BEFORE TOTAL: " + beforeTotal);
+        System.out.println("AFTER  TOTAL: " + afterTotal);
+        System.out.println("절감:       " + (beforeTotal - afterTotal)
+                + " (" + (beforeTotal == 0 ? 0 : Math.round((beforeTotal - afterTotal) * 1000.0 / beforeTotal) / 10.0) + "%)");
+        System.out.println("searchKeyword2 BEFORE=" + beforeMap.getOrDefault("searchKeyword2", 0)
+                + " AFTER=" + afterMap.getOrDefault("searchKeyword2", 0));
+        System.out.println("locationBased  BEFORE=" + beforeMap.getOrDefault("locationBasedList2", 0)
+                + " AFTER=" + afterMap.getOrDefault("locationBasedList2", 0));
+
+        // --- 메모리 캐시(2차 조회): IMAGE_CACHE·CONTENT_HIT_CACHE RAM 유지, contentId 재사용 ON ---
+        resetKorTraffic(); // 콜드 스타트
+        int pass1Thumb = 0, pass1Detail = 0;
+        for (HiddenGem g : gems) {
+            if (lookupThumbnail(g.resNm, g.sido) != null) {
+                pass1Thumb++;
+            }
+            if (buildPlaceDetailJson(g.resNm, g.sido, g.gungu == null ? "" : g.gungu).contains("\"found\":true")) {
+                pass1Detail++;
+            }
+        }
+        int pass1Total = korTotal();
+        Map<String, Integer> pass1Map = snapshotTraffic();
+
+        resetKorTrafficCounterOnly(); // 호출 카운터만 리셋, RAM 캐시 유지
+        int pass2Thumb = 0, pass2Detail = 0;
+        for (HiddenGem g : gems) {
+            if (lookupThumbnail(g.resNm, g.sido) != null) {
+                pass2Thumb++;
+            }
+            if (buildPlaceDetailJson(g.resNm, g.sido, g.gungu == null ? "" : g.gungu).contains("\"found\":true")) {
+                pass2Detail++;
+            }
+        }
+        int pass2Total = korTotal();
+        Map<String, Integer> pass2Map = snapshotTraffic();
+
+        System.out.println("=== 메모리 캐시 (2차 조회, RAM 유지) ===");
+        System.out.println("1차(콜드) TOTAL=" + pass1Total
+                + " search=" + pass1Map.getOrDefault("searchKeyword2", 0)
+                + " thumbOk=" + pass1Thumb + " detailOk=" + pass1Detail);
+        System.out.println("2차(웜)  TOTAL=" + pass2Total
+                + " search=" + pass2Map.getOrDefault("searchKeyword2", 0)
+                + " thumbOk=" + pass2Thumb + " detailOk=" + pass2Detail);
+        System.out.println("2차 절감: " + (pass1Total - pass2Total)
+                + " (" + (pass1Total == 0 ? 0 : Math.round((pass1Total - pass2Total) * 1000.0 / pass1Total) / 10.0) + "%)");
+    }
+
+    private static Map<String, Integer> snapshotTraffic() {
+        Map<String, Integer> m = new java.util.TreeMap<>();
+        for (Map.Entry<String, java.util.concurrent.atomic.AtomicInteger> e : KOR_TRAFFIC.entrySet()) {
+            m.put(e.getKey(), e.getValue().get());
+        }
+        return m;
+    }
+
+    private static List<HiddenGem> buildGemList(List<Attraction> all, int limit) {
+        Map<String, Integer> foreignRank = rankMap(all, a -> a.foreign);
+        Map<String, Integer> domesticRank = rankMap(all, a -> a.domestic);
+        List<HiddenGem> gems = new ArrayList<>();
+        for (Attraction a : all) {
+            if (a.foreign < MIN_FOREIGN_VISITORS || a.domestic <= 0) {
+                continue;
+            }
+            if (isBlockedName(a.resNm)) {
+                continue;
+            }
+            int fRank = foreignRank.getOrDefault(a.key(), all.size());
+            int dRank = domesticRank.getOrDefault(a.key(), all.size());
+            if (dRank <= MIN_DOMESTIC_RANK || fRank <= MIN_FOREIGN_RANK) {
+                continue;
+            }
+            int gap = dRank - fRank;
+            if (gap <= 0) {
+                continue;
+            }
+            double share = a.foreign / (a.foreign + a.domestic) * 100.0;
+            double score = Math.log(1.0 + a.foreign) * gap;
+            gems.add(new HiddenGem(a, share, dRank, fRank, score));
+        }
+        gems.sort(Comparator
+                .comparingDouble((HiddenGem g) -> g.gemScore).reversed()
+                .thenComparing(Comparator.comparingDouble((HiddenGem g) -> g.foreignShare).reversed()));
+        if (gems.size() > limit) {
+            gems = new ArrayList<>(gems.subList(0, limit));
+        }
+        return gems;
+    }
+
     private static String httpGet(String urlString) throws Exception {
+        noteKorTraffic(urlString);
         URL url = URI.create(urlString).toURL();
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
         conn.setRequestMethod("GET");

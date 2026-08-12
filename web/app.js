@@ -8,6 +8,7 @@ const panels = {
   ai: document.getElementById("panel-ai"),
   domestic: document.getElementById("panel-domestic"),
   foreign: document.getElementById("panel-foreign"),
+  my: document.getElementById("panel-my"),
 };
 
 const writeDialog = document.getElementById("writeDialog");
@@ -107,6 +108,11 @@ function saveUser(user) {
     localStorage.removeItem(AUTH_STORAGE_KEY);
   }
   renderAuthBar();
+  if (activeTab === "my") {
+    loadMyPage();
+  } else if (activeTab === "domestic" || activeTab === "foreign") {
+    loadBoardPosts(activeTab);
+  }
 }
 
 function renderAuthBar() {
@@ -118,6 +124,24 @@ function renderAuthBar() {
     authLabel.textContent = "로그인이 필요합니다";
     authOpenBtn.hidden = false;
     logoutBtn.hidden = true;
+  }
+  renderMyHeader();
+}
+
+function renderMyHeader() {
+  const avatar = document.getElementById("myAvatar");
+  const nameEl = document.getElementById("myName");
+  const subEl = document.getElementById("mySub");
+  if (!avatar || !nameEl || !subEl) return;
+  if (currentUser) {
+    const nick = currentUser.nickname || currentUser.memberId;
+    avatar.textContent = String(nick).charAt(0);
+    nameEl.textContent = nick;
+    subEl.textContent = `@${currentUser.memberId}`;
+  } else {
+    avatar.textContent = "?";
+    nameEl.textContent = "게스트";
+    subEl.textContent = "로그인하면 내 글·추천 목록을 볼 수 있어요";
   }
 }
 
@@ -337,6 +361,7 @@ async function loadHiddenGems() {
       resultsEl.appendChild(li);
       return;
     }
+    // 썸네일 검색이 끝난 뒤 상세 prefetch → 서버 CONTENT_HIT_CACHE 재사용
     await loadThumbnails(currentGems);
     prefetchPlaceDetails(currentGems);
   } catch (e) {
@@ -509,6 +534,8 @@ function renderPlaceDetail(gem, data) {
   }
 }
 
+let myView = "posts"; // posts | liked
+
 function boardThumb(post) {
   const letter = (post.locationTitle || post.nickname || "?").charAt(0);
   if (post.imageUrl) {
@@ -521,30 +548,137 @@ function boardCategoryForTab(tabId) {
   return tabId === "foreign" ? "FOREIGN" : "DOMESTIC";
 }
 
-function renderBoardList(listEl, posts) {
+function parseServerDate(regDate) {
+  if (!regDate) return NaN;
+  let s = String(regDate).trim().replace(" ", "T").replace(/\.\d+$/, "");
+  // 타임존 없으면 KST(+09:00)로 간주 (UTC로 읽혀 9시간 밀리는 것 방지)
+  if (!/[zZ]|[+-]\d{2}:?\d{2}$/.test(s)) {
+    s += "+09:00";
+  }
+  return Date.parse(s);
+}
+
+function formatRelativeTime(regDate) {
+  if (!regDate) return "";
+  const t = parseServerDate(regDate);
+  if (Number.isNaN(t)) return String(regDate).slice(0, 16);
+  const diff = Date.now() - t;
+  const m = Math.floor(diff / 60000);
+  if (m < 1) return "방금";
+  if (m < 60) return `${m}분`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}시간`;
+  const d = Math.floor(h / 24);
+  if (d < 7) return `${d}일`;
+  return formatKoreanDate(regDate);
+}
+
+function formatKoreanDate(regDate) {
+  const t = parseServerDate(regDate);
+  if (Number.isNaN(t)) return String(regDate).slice(0, 16);
+  return new Intl.DateTimeFormat("ko-KR", {
+    timeZone: "Asia/Seoul",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(new Date(t));
+}
+
+function categoryLabel(cat) {
+  return cat === "FOREIGN" ? "외국인" : "내국인";
+}
+
+function threadCardHtml(p, { showCategory = false } = {}) {
+  const name = p.nickname || p.memberId || "익명";
+  const letter = String(name).charAt(0);
+  const place = p.locationTitle
+    ? `<span class="thread-place">${escapeHtml(p.locationTitle)}${p.address ? ` · ${escapeHtml(p.address)}` : ""}</span>`
+    : "";
+  const media = p.imageUrl
+    ? `<div class="thread-media"><img src="${escapeHtml(p.imageUrl)}" alt="" loading="lazy" /></div>`
+    : "";
+  const cat = showCategory
+    ? `<span class="thread-cat">${escapeHtml(categoryLabel(p.category))}</span>`
+    : "";
+  const on = p.recommended ? "on" : "";
+  return `
+    <li class="thread-item" data-post-id="${p.postId}">
+      <div class="thread-avatar" aria-hidden="true">${escapeHtml(letter)}</div>
+      <div class="thread-main">
+        <div class="thread-head">
+          <span class="thread-name">${escapeHtml(name)}</span>
+          <span class="thread-handle">@${escapeHtml(p.memberId || "")}</span>
+          <span class="thread-time">· ${escapeHtml(formatRelativeTime(p.regDate))}</span>
+          ${cat}
+        </div>
+        ${place}
+        <p class="thread-text">${escapeHtml(p.content || "")}</p>
+        ${media}
+        <div class="thread-actions">
+          <button type="button" class="thread-action thread-rec ${on}" data-action="recommend" aria-label="추천">
+            ♥ ${Number(p.recommendCount) || 0}
+          </button>
+          <button type="button" class="thread-action" data-action="reply" aria-label="댓글">
+            💬 ${Number(p.replyCount) || 0}
+          </button>
+        </div>
+      </div>
+    </li>`;
+}
+
+function bindThreadFeed(listEl) {
+  listEl.querySelectorAll(".thread-item").forEach((li) => {
+    li.addEventListener("click", (e) => {
+      const actionBtn = e.target.closest("[data-action]");
+      const postId = Number(li.dataset.postId);
+      if (actionBtn?.dataset.action === "recommend") {
+        e.preventDefault();
+        e.stopPropagation();
+        toggleRecommendFromFeed(postId, actionBtn);
+        return;
+      }
+      openDetail(postId);
+    });
+  });
+}
+
+function renderBoardList(listEl, posts, opts = {}) {
   if (!posts.length) {
-    listEl.innerHTML = `<li class="empty-state">아직 게시글이 없습니다. 글쓰기로 첫 글을 남겨 보세요.</li>`;
+    listEl.innerHTML = `<li class="empty-state">${opts.emptyText || "아직 게시글이 없습니다. 글쓰기로 첫 글을 남겨 보세요."}</li>`;
     return;
   }
-  listEl.innerHTML = posts
-    .map((p) => {
-      const title = p.locationTitle || "장소 미정";
-      const preview = (p.content || "").replace(/\s+/g, " ").slice(0, 80);
-      return `
-        <li class="post-item board-item" data-post-id="${p.postId}">
-          <div class="post-thumb" aria-hidden="true">${boardThumb(p)}</div>
-          <div class="post-body">
-            <h2 class="post-title">${escapeHtml(title)}</h2>
-            <p class="post-meta">${escapeHtml(p.nickname || p.memberId)} · 추천 ${p.recommendCount} · 댓글 ${p.replyCount}</p>
-            <p class="post-meta">${escapeHtml(preview)}</p>
-          </div>
-        </li>`;
-    })
-    .join("");
+  listEl.innerHTML = posts.map((p) => threadCardHtml(p, opts)).join("");
+  bindThreadFeed(listEl);
+}
 
-  listEl.querySelectorAll(".board-item").forEach((li) => {
-    li.addEventListener("click", () => openDetail(Number(li.dataset.postId)));
-  });
+async function toggleRecommendFromFeed(postId, btn) {
+  if (!requireLogin("추천은 로그인 후 이용할 수 있습니다.")) return;
+  try {
+    const res = await fetch(`/api/posts/${postId}/recommend`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ memberId: currentMemberId() }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "추천 실패");
+    btn.classList.toggle("on", !!data.recommended);
+    btn.innerHTML = `♥ ${Number(data.recommendCount) || 0}`;
+    const cached = boardPosts.find((p) => p.postId === postId);
+    if (cached) {
+      cached.recommended = !!data.recommended;
+      cached.recommendCount = Number(data.recommendCount) || 0;
+    }
+    if (currentDetail?.postId === postId) {
+      currentDetail.recommended = !!data.recommended;
+      currentDetail.recommendCount = Number(data.recommendCount) || 0;
+      renderDetail();
+    }
+  } catch (err) {
+    alert(err.message || "추천 실패");
+  }
 }
 
 async function loadBoardPosts(tabId = activeTab) {
@@ -554,7 +688,7 @@ async function loadBoardPosts(tabId = activeTab) {
   const statusElBoard = document.getElementById(statusId);
   const listEl = document.getElementById(listId);
 
-  showStatus(statusElBoard, "게시글을 불러오는 중…", "info");
+  showStatus(statusElBoard, "피드를 불러오는 중…", "info");
   const qs = new URLSearchParams({
     memberId: currentMemberId(),
     category,
@@ -569,6 +703,51 @@ async function loadBoardPosts(tabId = activeTab) {
   } catch (e) {
     showStatus(statusElBoard, e.message || "오류", "error");
   }
+}
+
+async function loadMyPage() {
+  const statusElBoard = document.getElementById("boardStatusMy");
+  const listEl = document.getElementById("boardListMy");
+  renderMyHeader();
+
+  if (!currentMemberId()) {
+    hideStatus(statusElBoard);
+    listEl.innerHTML = `<li class="empty-state">로그인하면 내가 쓴 글과 추천한 글을 볼 수 있습니다.</li>`;
+    return;
+  }
+
+  const qs = new URLSearchParams({ memberId: currentMemberId() });
+  if (myView === "liked") {
+    qs.set("likedBy", currentMemberId());
+  } else {
+    qs.set("author", currentMemberId());
+  }
+
+  showStatus(statusElBoard, "불러오는 중…", "info");
+  try {
+    const res = await fetch(`/api/posts?${qs}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "조회 실패");
+    boardPosts = data.posts || [];
+    hideStatus(statusElBoard);
+    renderBoardList(listEl, boardPosts, {
+      showCategory: true,
+      emptyText:
+        myView === "liked"
+          ? "아직 추천한 글이 없습니다. 피드에서 ♥를 눌러 보세요."
+          : "아직 작성한 글이 없습니다. 글쓰기로 남겨 보세요.",
+    });
+  } catch (e) {
+    showStatus(statusElBoard, e.message || "오류", "error");
+  }
+}
+
+function setMyView(view) {
+  myView = view === "liked" ? "liked" : "posts";
+  document.querySelectorAll(".my-subtab").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.myView === myView);
+  });
+  loadMyPage();
 }
 
 async function openDetail(postId) {
@@ -594,7 +773,7 @@ function renderDetail() {
   detailBody.innerHTML = `
     ${img}
     <h2 class="detail-title">${escapeHtml(p.locationTitle || "장소 미정")}</h2>
-    <p class="detail-meta">${escapeHtml(p.nickname || p.memberId)} · ${escapeHtml(p.regDate || "")}</p>
+    <p class="detail-meta">${escapeHtml(p.nickname || p.memberId)} · ${escapeHtml(formatKoreanDate(p.regDate || ""))}</p>
     <p class="detail-meta">${escapeHtml(p.address || "")}</p>
     <p class="detail-content">${escapeHtml(p.content || "")}</p>
     <p class="detail-meta">추천 ${p.recommendCount} · 댓글 ${(p.replies || []).length}</p>
@@ -628,6 +807,16 @@ function escapeHtml(s) {
     .replaceAll('"', "&quot;");
 }
 
+function refreshActiveFeed() {
+  if (activeTab === "domestic" || activeTab === "foreign") {
+    return loadBoardPosts(activeTab);
+  }
+  if (activeTab === "my") {
+    return loadMyPage();
+  }
+  return Promise.resolve();
+}
+
 function switchTab(tabId) {
   activeTab = tabId;
   tabs.forEach((tab) => {
@@ -642,6 +831,8 @@ function switchTab(tabId) {
   });
   if (tabId === "domestic" || tabId === "foreign") {
     loadBoardPosts(tabId);
+  } else if (tabId === "my") {
+    loadMyPage();
   }
 }
 
@@ -920,9 +1111,7 @@ deletePostBtn.addEventListener("click", async () => {
     if (!res.ok) throw new Error(data.error || "삭제 실패");
     detailDialog.close();
     currentDetail = null;
-    if (activeTab === "domestic" || activeTab === "foreign") {
-      await loadBoardPosts(activeTab);
-    }
+    await refreshActiveFeed();
   } catch (err) {
     alert(err.message || "삭제 실패");
   }
@@ -958,9 +1147,7 @@ recommendBtn.addEventListener("click", async () => {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "추천 실패");
     await openDetail(currentDetail.postId);
-    if (activeTab === "domestic" || activeTab === "foreign") {
-      loadBoardPosts(activeTab);
-    }
+    await refreshActiveFeed();
   } catch (err) {
     alert(err.message || "추천 실패");
   }
@@ -982,12 +1169,14 @@ replyForm.addEventListener("submit", async (e) => {
     if (!res.ok) throw new Error(data.error || "댓글 등록 실패");
     replyInput.value = "";
     await openDetail(currentDetail.postId);
-    if (activeTab === "domestic" || activeTab === "foreign") {
-      loadBoardPosts(activeTab);
-    }
+    await refreshActiveFeed();
   } catch (err) {
     alert(err.message || "댓글 등록 실패");
   }
+});
+
+document.querySelectorAll(".my-subtab").forEach((btn) => {
+  btn.addEventListener("click", () => setMyView(btn.dataset.myView));
 });
 
 currentUser = loadStoredUser();

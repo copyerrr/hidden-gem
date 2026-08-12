@@ -259,8 +259,17 @@ public final class BoardApi {
     private static void listPosts(HttpExchange ex) throws Exception {
         Map<String, String> qmap = query(ex.getRequestURI());
         String viewer = qmap.getOrDefault("memberId", "");
-        String category = qmap.getOrDefault("category", "DOMESTIC");
-        List<Map<String, Object>> posts = BoardDb.listPosts(viewer, category);
+        String author = qmap.getOrDefault("author", "").trim();
+        String likedBy = qmap.getOrDefault("likedBy", "").trim();
+        List<Map<String, Object>> posts;
+        if (!author.isEmpty()) {
+            posts = BoardDb.listPostsByAuthor(viewer, author);
+        } else if (!likedBy.isEmpty()) {
+            posts = BoardDb.listRecommendedPosts(viewer, likedBy);
+        } else {
+            String category = qmap.getOrDefault("category", "DOMESTIC");
+            posts = BoardDb.listPosts(viewer, category);
+        }
         StringBuilder sb = new StringBuilder("{\"posts\":[");
         for (int i = 0; i < posts.size(); i++) {
             if (i > 0) {
@@ -328,7 +337,9 @@ public final class BoardApi {
     private static void toggleRecommend(HttpExchange ex, long postId) throws Exception {
         Map<String, String> body = parseJson(readBody(ex));
         boolean on = BoardDb.toggleRecommend(body.get("memberId"), postId);
-        json(ex, 200, "{\"recommended\":" + on + "}");
+        Map<String, Object> post = BoardDb.getPost(postId, body.get("memberId"));
+        long count = post == null ? 0L : ((Number) post.get("recommendCount")).longValue();
+        json(ex, 200, "{\"recommended\":" + on + ",\"recommendCount\":" + count + "}");
     }
 
     private static String userJson(Map<String, String> user) {
