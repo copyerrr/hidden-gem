@@ -1,0 +1,37 @@
+﻿KorService2 트래픽 비교 (썸네일+상세, 장소 10곳)
+캐시 사용: out\ym-201201.tsv (1176건)
+샘플:
+  1. 용인 대장금 파크 / 경기도
+  2. 설악파크 / 강원특별자치도
+  3. 산머루농원 / 경기도
+  4. 선비문화수련원 / 경상북도
+  5. 달곁에 별 / 경기도
+  6. 종묘 / 서울특별시
+  7. 구리시 고구려 대장간마을 / 경기도
+  8. 한국전통음식문화체험관 / 강원특별자치도
+  9. 태릉 ·  강릉 · 조선왕릉전시관 / 서울특별시
+  10. 삼성혈 / 제주특별자치도
+--- BEFORE (재검색) thumbOk=8 detailOk=4 ---
+TOTAL=105
+  detailCommon2=8
+  detailImage2=6
+  detailIntro2=8
+  locationBasedList2=8
+  searchKeyword2=75
+--- AFTER (contentId 재사용) thumbOk=8 detailOk=8 ---
+TOTAL=87
+  detailCommon2=8
+  detailImage2=6
+  detailIntro2=8
+  locationBasedList2=16
+  searchKeyword2=49
+=== 비교 요약 ===
+BEFORE TOTAL: 105
+AFTER  TOTAL: 87
+절감:       18 (17.1%)
+searchKeyword2 BEFORE=75 AFTER=49
+locationBased  BEFORE=8 AFTER=16
+=== 메모리 캐시 (2차 조회, RAM 유지) ===
+1차(콜드) TOTAL=87 search=49 thumbOk=8 detailOk=8
+2차(웜)  TOTAL=51 search=19 thumbOk=8 detailOk=8
+2차 절감: 36 (41.4%)

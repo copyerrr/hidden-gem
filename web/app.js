@@ -49,6 +49,160 @@ const authNickname = document.getElementById("authNickname");
 const DEFAULT_YM = "201201";
 const DEFAULT_LIMIT = "30";
 const AUTH_STORAGE_KEY = "hiddengem_user";
+const LANG_STORAGE_KEY = "hiddengem_lang";
+/** @type {'ko'|'en'} */
+let uiLang = localStorage.getItem(LANG_STORAGE_KEY) === "en" ? "en" : "ko";
+const UI_I18N = {
+  ko: {
+    tabAi: "AI 추천",
+    tabDomestic: "내국인",
+    tabForeign: "외국인",
+    tabMy: "마이",
+    needLogin: "로그인이 필요합니다",
+    loginJoin: "로그인 / 가입",
+    logout: "로그아웃",
+    write: "글쓰기",
+    region: "지역",
+    nationwide: "전국",
+    sort: "정렬",
+    sortGem: "추천순",
+    sortForeign: "외국인 많은 순",
+    sortDomestic: "내국인 많은 순",
+    myPosts: "내가 쓴 글",
+    myLiked: "추천한 글",
+    translating: "번역 중…",
+    foreignVisitors: "외국인",
+    domesticVisitors: "내국인",
+  },
+  en: {
+    tabAi: "AI Picks",
+    tabDomestic: "Locals",
+    tabForeign: "Visitors",
+    tabMy: "My",
+    needLogin: "Sign in required",
+    loginJoin: "Sign in / Join",
+    logout: "Log out",
+    write: "Write",
+    region: "Region",
+    nationwide: "All",
+    sort: "Sort",
+    sortGem: "Recommended",
+    sortForeign: "Most foreign visitors",
+    sortDomestic: "Most local visitors",
+    myPosts: "My posts",
+    myLiked: "Liked",
+    translating: "Translating…",
+    foreignVisitors: "Foreign",
+    domesticVisitors: "Local",
+  },
+};
+
+function t(key) {
+  return (UI_I18N[uiLang] && UI_I18N[uiLang][key]) || UI_I18N.ko[key] || key;
+}
+
+function syncLangButtons() {
+  document.querySelectorAll(".lang-btn").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.lang === uiLang);
+  });
+}
+
+function applyChromeI18n() {
+  document.querySelectorAll(".tab").forEach((tab) => {
+    const id = tab.dataset.tab;
+    if (id === "ai") tab.textContent = t("tabAi");
+    else if (id === "domestic") tab.textContent = t("tabDomestic");
+    else if (id === "foreign") tab.textContent = t("tabForeign");
+    else if (id === "my") tab.textContent = t("tabMy");
+  });
+  if (!currentUser) authLabel.textContent = t("needLogin");
+  authOpenBtn.textContent = t("loginJoin");
+  logoutBtn.textContent = t("logout");
+  writeBtn.title = t("write");
+  writeBtn.textContent = t("write");
+  const regionLabel = document.querySelector('label[for="sidoSelect"]');
+  const sortLabel = document.querySelector('label[for="sort"]');
+  if (regionLabel) regionLabel.textContent = t("region");
+  if (sortLabel) sortLabel.textContent = t("sort");
+  const sort = document.getElementById("sort");
+  if (sort) {
+    const opts = sort.options;
+    if (opts[0]) opts[0].textContent = t("sortGem");
+    if (opts[1]) opts[1].textContent = t("sortForeign");
+    if (opts[2]) opts[2].textContent = t("sortDomestic");
+  }
+  const firstSido = sidoSelect?.options?.[0];
+  if (firstSido && !firstSido.value) firstSido.textContent = t("nationwide");
+  document.querySelectorAll(".my-subtab").forEach((btn) => {
+    if (btn.dataset.myView === "posts") btn.textContent = t("myPosts");
+    if (btn.dataset.myView === "liked") btn.textContent = t("myLiked");
+  });
+}
+
+async function translateBatch(texts, targetLang = "EN") {
+  const list = (texts || []).map((x) => (x == null ? "" : String(x)));
+  if (!list.length || list.every((x) => !x.trim())) {
+    return list.slice();
+  }
+  const res = await fetch("/api/translate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ texts: list, targetLang }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || "Translation failed");
+  return data.translations || list;
+}
+
+function displayGemName(gem) {
+  return uiLang === "en" && gem.resNmEn ? gem.resNmEn : gem.resNm;
+}
+
+function displayGemLocation(gem) {
+  const raw = [gem.sido, gem.gungu].filter(Boolean).join(" ");
+  return uiLang === "en" && gem.locationEn ? gem.locationEn : raw;
+}
+
+async function translateCurrentGems() {
+  if (uiLang !== "en" || !currentGems.length) return;
+  const need = currentGems.filter((g) => !g.resNmEn);
+  if (!need.length) return;
+  const texts = [];
+  for (const g of need) {
+    texts.push(g.resNm || "");
+    texts.push([g.sido, g.gungu].filter(Boolean).join(" "));
+  }
+  const tr = await translateBatch(texts, "EN");
+  for (let i = 0; i < need.length; i++) {
+    need[i].resNmEn = tr[i * 2] || need[i].resNm;
+    need[i].locationEn = tr[i * 2 + 1] || [need[i].sido, need[i].gungu].filter(Boolean).join(" ");
+  }
+}
+
+async function translatePosts(posts) {
+  if (uiLang !== "en" || !posts?.length) return;
+  const need = posts.filter((p) => !p._en);
+  if (!need.length) return;
+  const texts = [];
+  for (const p of need) {
+    texts.push(p.content || "");
+    texts.push(p.locationTitle || "");
+    texts.push(p.address || "");
+  }
+  const tr = await translateBatch(texts, "EN");
+  for (let i = 0; i < need.length; i++) {
+    need[i]._en = {
+      content: tr[i * 3] || need[i].content,
+      locationTitle: tr[i * 3 + 1] || need[i].locationTitle,
+      address: tr[i * 3 + 2] || need[i].address,
+    };
+  }
+}
+
+function postField(p, field) {
+  if (uiLang === "en" && p._en && p._en[field] != null) return p._en[field];
+  return p[field];
+}
 
 /** @type {{ memberId: string, nickname: string } | null} */
 let currentUser = null;
@@ -237,7 +391,8 @@ function renderGems(gems) {
 
   resultsEl.innerHTML = sorted
     .map((gem) => {
-      const location = [gem.sido, gem.gungu].filter(Boolean).join(" ");
+      const location = displayGemLocation(gem);
+      const name = displayGemName(gem);
       const key = gemKey(gem);
       return `
         <li class="post-item gem-item" data-key="${escapeHtml(key)}" role="button" tabindex="0">
@@ -245,8 +400,8 @@ function renderGems(gems) {
             ${thumbHtml(gem)}
           </div>
           <div class="post-body">
-            <h2 class="post-title">${escapeHtml(gem.resNm)}</h2>
-            <p class="post-meta">${escapeHtml(location)} · 외국인 ${formatNum(gem.foreignVisitors)} · 내국인 ${formatNum(gem.domesticVisitors)}</p>
+            <h2 class="post-title">${escapeHtml(name)}</h2>
+            <p class="post-meta">${escapeHtml(location)} · ${t("foreignVisitors")} ${formatNum(gem.foreignVisitors)} · ${t("domesticVisitors")} ${formatNum(gem.domesticVisitors)}</p>
           </div>
         </li>`;
     })
@@ -258,19 +413,11 @@ function applyThumbnails(thumbnails) {
     const url = thumbnails[gemKey(gem)];
     if (url) gem.thumbnail = url;
   }
-  for (const li of resultsEl.querySelectorAll(".post-item")) {
-    const key = li.dataset.key;
-    const url = thumbnails[key];
-    if (!url) continue;
-    const thumb = li.querySelector(".post-thumb");
-    if (!thumb || thumb.querySelector("img")) continue;
-    const letter = key.charAt(0);
-    thumb.innerHTML = `<img src="${escapeHtml(url)}" alt="" loading="lazy" onerror="this.remove();this.parentElement.querySelector('.thumb-fallback')?.removeAttribute('hidden')" /><span class="thumb-letter thumb-fallback" hidden>${escapeHtml(letter)}</span>`;
-  }
+  renderGems(currentGems);
 }
 
 async function loadThumbnails(gems) {
-  if (!gems.length) return;
+  if (!gems.length) return {};
   const body = gems.map((g) => `${g.resNm}\t${g.sido || ""}`).join("\n");
   try {
     const res = await fetch("/api/thumbnails", {
@@ -279,10 +426,15 @@ async function loadThumbnails(gems) {
       body,
     });
     const data = await res.json();
-    if (!res.ok) return;
-    applyThumbnails(data.thumbnails || {});
+    if (!res.ok) return {};
+    const thumbnails = data.thumbnails || {};
+    for (const gem of gems) {
+      const url = thumbnails[gemKey(gem)];
+      if (url) gem.thumbnail = url;
+    }
+    return thumbnails;
   } catch {
-    /* 사진 없이 목록만 표시 */
+    return {};
   }
 }
 
@@ -334,12 +486,13 @@ async function prefetchPlaceDetails(gems) {
 }
 
 async function loadHiddenGems() {
-  showStatus(statusEl, "AI 추천 목록을 불러오는 중…", "info");
+  showStatus(statusEl, uiLang === "en" ? "Loading AI picks…" : "AI 추천 목록을 불러오는 중…", "info");
   resultsEl.innerHTML = "";
   placeDetailCache.clear();
   placeDetailInflight.clear();
 
-  const params = new URLSearchParams({ ym: DEFAULT_YM, limit: DEFAULT_LIMIT });
+  // 사진·상세 없는 곳을 걸러내므로 후보를 넉넉히 가져온 뒤 통과분만 표시
+  const params = new URLSearchParams({ ym: DEFAULT_YM, limit: "100" });
   const sido = sidoSelect?.value || "";
   if (sido) params.set("sido", sido);
 
@@ -348,22 +501,65 @@ async function loadHiddenGems() {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "조회 실패");
 
-    currentGems = data.gems || [];
+    let gems = data.gems || [];
+    if (!gems.length) {
+      currentGems = [];
+      hideStatus(statusEl);
+      resultsEl.innerHTML = "";
+      const li = document.createElement("li");
+      li.className = "empty-state";
+      li.textContent = sido
+        ? uiLang === "en"
+          ? "No recommendations for this region."
+          : "이 지역에 해당하는 추천 장소가 없습니다."
+        : uiLang === "en"
+          ? "No recommendations."
+          : "추천 장소가 없습니다.";
+      resultsEl.appendChild(li);
+      return;
+    }
+
+    showStatus(
+      statusEl,
+      uiLang === "en" ? "Checking photos & details…" : "사진·상세 정보가 있는 장소만 추리는 중…",
+      "info"
+    );
+    await loadThumbnails(gems);
+    await prefetchPlaceDetails(gems);
+
+    gems = gems.filter((g) => {
+      if (!g.thumbnail) return false;
+      const detail = placeDetailCache.get(gemKey(g));
+      return !!(detail && detail.found === true);
+    });
+
+    // 화면에 너무 많이 안 나오게 상위 N개만
+    const showLimit = Number(DEFAULT_LIMIT) || 30;
+    if (gems.length > showLimit) {
+      gems = gems.slice(0, showLimit);
+    }
+
+    currentGems = gems;
+    if (uiLang === "en" && currentGems.length) {
+      showStatus(statusEl, t("translating"), "info");
+      try {
+        await translateCurrentGems();
+      } catch (err) {
+        console.warn(err);
+      }
+    }
     hideStatus(statusEl);
     renderGems(currentGems);
     if (!currentGems.length) {
       resultsEl.innerHTML = "";
       const li = document.createElement("li");
       li.className = "empty-state";
-      li.textContent = sido
-        ? "이 지역에 해당하는 추천 장소가 없습니다."
-        : "추천 장소가 없습니다.";
+      li.textContent =
+        uiLang === "en"
+          ? "No places with both photo and details were found."
+          : "사진과 상세 정보가 모두 있는 추천 장소가 없습니다.";
       resultsEl.appendChild(li);
-      return;
     }
-    // 썸네일 검색이 끝난 뒤 상세 prefetch → 서버 CONTENT_HIT_CACHE 재사용
-    await loadThumbnails(currentGems);
-    prefetchPlaceDetails(currentGems);
   } catch (e) {
     showStatus(statusEl, e.message || "오류가 발생했습니다.", "error");
   }
@@ -393,15 +589,17 @@ async function openPlaceDetail(gem) {
   const cached = placeDetailCache.get(key);
 
   if (cached) {
+    await maybeTranslatePlace(gem, cached);
     renderPlaceDetail(gem, cached);
     return;
   }
 
-  placeBody.innerHTML = `<div class="place-loading">관광 정보를 불러오는 중…</div>`;
+  placeBody.innerHTML = `<div class="place-loading">${uiLang === "en" ? "Loading…" : "관광 정보를 불러오는 중…"}</div>`;
 
   try {
     const data = await fetchPlaceDetail(gem);
     if (gemKey(gem) === key) {
+      await maybeTranslatePlace(gem, data);
       renderPlaceDetail(gem, data);
     }
   } catch (e) {
@@ -409,31 +607,138 @@ async function openPlaceDetail(gem) {
   }
 }
 
-function nearbyCardsHtml(list) {
-  if (!list || !list.length) {
-    return `<p class="nearby-empty">주변에 표시할 장소가 없습니다.</p>`;
+async function maybeTranslatePlace(gem, data) {
+  if (uiLang !== "en" || !data || data._enReady) return;
+  try {
+    const texts = [];
+    const slots = [];
+    const push = (value, apply) => {
+      texts.push(value == null ? "" : String(value));
+      slots.push(apply);
+    };
+    push(data.title || gem.resNm, (v) => {
+      data.titleEn = v;
+    });
+    push(data.addr || "", (v) => {
+      data.addrEn = v;
+    });
+    push(data.overview || "", (v) => {
+      data.overviewEn = v;
+    });
+    push(data.message || "", (v) => {
+      data.messageEn = v;
+    });
+    for (const row of data.info || []) {
+      push(row.label || "", (v) => {
+        row.labelEn = v;
+      });
+      push(row.value || "", (v) => {
+        row.valueEn = v;
+      });
+    }
+    for (const n of [...(data.restaurants || []), ...(data.attractions || [])]) {
+      push(n.title || "", (v) => {
+        n.titleEn = v;
+      });
+      push(n.addr || "", (v) => {
+        n.addrEn = v;
+      });
+    }
+    const tr = await translateBatch(texts, "EN");
+    slots.forEach((apply, i) => apply(tr[i] || texts[i]));
+    data._enReady = true;
+  } catch (err) {
+    console.warn(err);
   }
-  return `<div class="nearby-row">${list
+}
+
+function nearbyCardsHtml(list) {
+  const filtered = (list || []).filter((p) => p && p.contentId && p.image && p.title);
+  if (!filtered.length) {
+    return `<p class="nearby-empty">${uiLang === "en" ? "No nearby places with photos." : "사진이 있는 주변 장소가 없습니다."}</p>`;
+  }
+  return `<div class="nearby-row">${filtered
     .map((p) => {
-      const letter = (p.title || "?").charAt(0);
-      const thumb = p.image
-        ? `<img src="${escapeHtml(p.image)}" alt="" loading="lazy" onerror="this.remove()" />`
-        : `<span>${escapeHtml(letter)}</span>`;
+      const title = uiLang === "en" && p.titleEn ? p.titleEn : p.title;
+      const addr = uiLang === "en" && p.addrEn ? p.addrEn : p.addr;
       return `
-        <article class="nearby-card">
-          <div class="nearby-thumb">${thumb}</div>
+        <article class="nearby-card" role="button" tabindex="0"
+          data-content-id="${escapeHtml(p.contentId)}"
+          data-title="${escapeHtml(p.title || "")}"
+          data-addr="${escapeHtml(p.addr || "")}"
+          data-image="${escapeHtml(p.image || "")}">
+          <div class="nearby-thumb"><img src="${escapeHtml(p.image)}" alt="" loading="lazy" /></div>
           <div class="nearby-meta">
-            <h4 class="nearby-title">${escapeHtml(p.title || "")}</h4>
-            <p class="nearby-dist">${escapeHtml(formatDist(p.dist))}${p.addr ? " · " + escapeHtml(p.addr) : ""}</p>
+            <h4 class="nearby-title">${escapeHtml(title || "")}</h4>
+            <p class="nearby-dist">${escapeHtml(formatDist(p.dist))}${addr ? " · " + escapeHtml(addr) : ""}</p>
           </div>
         </article>`;
     })
     .join("")}</div>`;
 }
 
+function bindNearbyCards() {
+  placeBody.querySelectorAll(".nearby-card[data-content-id]").forEach((card) => {
+    const open = () => {
+      openNearbyPlace({
+        contentId: card.dataset.contentId,
+        title: card.dataset.title || "",
+        addr: card.dataset.addr || "",
+        image: card.dataset.image || "",
+      });
+    };
+    card.addEventListener("click", open);
+    card.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        open();
+      }
+    });
+  });
+}
+
+async function openNearbyPlace(place) {
+  if (!place?.contentId) return;
+  const gem = {
+    resNm: place.title || "장소",
+    sido: "",
+    gungu: "",
+    foreignVisitors: 0,
+    domesticVisitors: 0,
+    thumbnail: place.image || "",
+  };
+  if (!placeDialog.open) placeDialog.showModal();
+  placeBody.innerHTML = `<div class="place-loading">${uiLang === "en" ? "Loading…" : "불러오는 중…"}</div>`;
+  try {
+    const params = new URLSearchParams({
+      contentId: place.contentId,
+      resNm: place.title || "",
+    });
+    const res = await fetch(`/api/place-detail?${params}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "상세 조회 실패");
+    if (!data.found) {
+      placeBody.innerHTML = `<div class="place-empty">${escapeHtml(
+        data.message || (uiLang === "en" ? "Details not available." : "상세 정보가 없습니다.")
+      )}</div>`;
+      return;
+    }
+    placeDetailCache.set("cid:" + place.contentId, data);
+    await maybeTranslatePlace(gem, data);
+    renderPlaceDetail(gem, data);
+  } catch (e) {
+    placeBody.innerHTML = `<div class="place-empty">${escapeHtml(e.message || "불러오지 못했습니다.")}</div>`;
+  }
+}
+
 function renderPlaceDetail(gem, data) {
-  const location = [gem.sido, gem.gungu].filter(Boolean).join(" ");
-  const title = data.found ? data.title || gem.resNm : gem.resNm;
+  const location = displayGemLocation(gem);
+  const title =
+    uiLang === "en"
+      ? data.titleEn || data.title || displayGemName(gem)
+      : data.found
+        ? data.title || gem.resNm
+        : gem.resNm;
   const letter = (title || "?").charAt(0);
   const heroImg = data.image || gem.thumbnail;
 
@@ -442,31 +747,38 @@ function renderPlaceDetail(gem, data) {
       <div class="place-hero"><div class="place-hero-fallback">${escapeHtml(letter)}</div></div>
       <div class="place-content">
         <div>
-          <p class="place-kicker">${escapeHtml(location || "위치 미상")}</p>
-          <h2 class="place-title">${escapeHtml(gem.resNm)}</h2>
+          <p class="place-kicker">${escapeHtml(location || (uiLang === "en" ? "Unknown" : "위치 미상"))}</p>
+          <h2 class="place-title">${escapeHtml(displayGemName(gem))}</h2>
           <div class="place-stats">
-            <span class="place-chip">외국인 ${formatNum(gem.foreignVisitors)}</span>
-            <span class="place-chip">내국인 ${formatNum(gem.domesticVisitors)}</span>
+            <span class="place-chip">${t("foreignVisitors")} ${formatNum(gem.foreignVisitors)}</span>
+            <span class="place-chip">${t("domesticVisitors")} ${formatNum(gem.domesticVisitors)}</span>
           </div>
         </div>
-        <p class="nearby-empty">${escapeHtml(data.message || "상세 정보를 찾지 못했습니다.")}</p>
+        <p class="nearby-empty">${escapeHtml(
+          (uiLang === "en" && data.messageEn) || data.message || (uiLang === "en" ? "Details not found." : "상세 정보를 찾지 못했습니다.")
+        )}</p>
       </div>`;
     return;
   }
 
   const infoList = (data.info || [])
-    .map(
-      (row) => `
+    .map((row) => {
+      const label = uiLang === "en" && row.labelEn ? row.labelEn : row.label;
+      const value = uiLang === "en" && row.valueEn ? row.valueEn : row.value;
+      return `
       <li class="place-info-item">
-        <span class="place-info-label">${escapeHtml(row.label)}</span>
-        <span class="place-info-value">${escapeHtml(row.value)}</span>
-      </li>`
-    )
+        <span class="place-info-label">${escapeHtml(label)}</span>
+        <span class="place-info-value">${escapeHtml(value)}</span>
+      </li>`;
+    })
     .join("");
 
-  const overview = data.overview || "";
+  const overview =
+    uiLang === "en" && data.overviewEn ? data.overviewEn : data.overview || "";
   const showMore = overview.length > 220;
   const telRaw = String(data.tel || "").split(/[,\n]/)[0].trim();
+  const addr =
+    uiLang === "en" && data.addrEn ? data.addrEn : data.addr || "";
 
   placeBody.innerHTML = `
     <div class="place-hero">
@@ -478,48 +790,48 @@ function renderPlaceDetail(gem, data) {
     </div>
     <div class="place-content">
       <header>
-        <p class="place-kicker">${escapeHtml(data.addr || location || "")}</p>
+        <p class="place-kicker">${escapeHtml(addr || location || "")}</p>
         <h2 class="place-title">${escapeHtml(title)}</h2>
         <div class="place-stats">
-          <span class="place-chip">외국인 ${formatNum(gem.foreignVisitors)}</span>
-          <span class="place-chip">내국인 ${formatNum(gem.domesticVisitors)}</span>
+          <span class="place-chip">${t("foreignVisitors")} ${formatNum(gem.foreignVisitors)}</span>
+          <span class="place-chip">${t("domesticVisitors")} ${formatNum(gem.domesticVisitors)}</span>
         </div>
       </header>
 
       <section>
-        <h3 class="place-section-title">소개</h3>
+        <h3 class="place-section-title">${uiLang === "en" ? "About" : "소개"}</h3>
         ${
           overview
             ? `<p class="place-overview" id="placeOverview">${escapeHtml(overview)}</p>
-               ${showMore ? `<button type="button" class="place-more" id="placeMoreBtn">더 보기</button>` : ""}`
-            : `<p class="nearby-empty">소개글이 없습니다.</p>`
+               ${showMore ? `<button type="button" class="place-more" id="placeMoreBtn">${uiLang === "en" ? "More" : "더 보기"}</button>` : ""}`
+            : `<p class="nearby-empty">${uiLang === "en" ? "No description." : "소개글이 없습니다."}</p>`
         }
       </section>
 
       <section>
-        <h3 class="place-section-title">이용 정보</h3>
+        <h3 class="place-section-title">${uiLang === "en" ? "Visitor info" : "이용 정보"}</h3>
         ${
           infoList
             ? `<ul class="place-info-list">${infoList}</ul>`
-            : `<p class="nearby-empty">이용 정보가 없습니다.</p>`
+            : `<p class="nearby-empty">${uiLang === "en" ? "No visitor info." : "이용 정보가 없습니다."}</p>`
         }
         ${
           data.homepage || data.tel
             ? `<div class="place-links" style="margin-top:0.7rem">
-                ${data.homepage ? `<a class="place-link" href="${escapeHtml(data.homepage)}" target="_blank" rel="noopener">홈페이지</a>` : ""}
-                ${data.tel ? `<a class="place-link" href="tel:${escapeHtml(telRaw)}">전화</a>` : ""}
+                ${data.homepage ? `<a class="place-link" href="${escapeHtml(data.homepage)}" target="_blank" rel="noopener">${uiLang === "en" ? "Website" : "홈페이지"}</a>` : ""}
+                ${data.tel ? `<a class="place-link" href="tel:${escapeHtml(telRaw)}">${uiLang === "en" ? "Call" : "전화"}</a>` : ""}
               </div>`
             : ""
         }
       </section>
 
       <section>
-        <h3 class="place-section-title">근처 맛집</h3>
+        <h3 class="place-section-title">${uiLang === "en" ? "Nearby food" : "근처 맛집"}</h3>
         ${nearbyCardsHtml(data.restaurants)}
       </section>
 
       <section>
-        <h3 class="place-section-title">근처에 가볼 곳</h3>
+        <h3 class="place-section-title">${uiLang === "en" ? "Nearby spots" : "근처에 가볼 곳"}</h3>
         ${nearbyCardsHtml(data.attractions)}
       </section>
     </div>`;
@@ -529,9 +841,16 @@ function renderPlaceDetail(gem, data) {
   if (moreBtn && overviewEl) {
     moreBtn.addEventListener("click", () => {
       const open = overviewEl.classList.toggle("expanded");
-      moreBtn.textContent = open ? "접기" : "더 보기";
+      moreBtn.textContent = open
+        ? uiLang === "en"
+          ? "Less"
+          : "접기"
+        : uiLang === "en"
+          ? "More"
+          : "더 보기";
     });
   }
+  bindNearbyCards();
 }
 
 let myView = "posts"; // posts | liked
@@ -548,20 +867,22 @@ function boardCategoryForTab(tabId) {
   return tabId === "foreign" ? "FOREIGN" : "DOMESTIC";
 }
 
-function parseServerDate(regDate) {
+function parseServerDate(regDate, regAt) {
+  if (typeof regAt === "number" && Number.isFinite(regAt)) return regAt;
+  if (regAt != null && regAt !== "" && !Number.isNaN(Number(regAt))) return Number(regAt);
   if (!regDate) return NaN;
   let s = String(regDate).trim().replace(" ", "T").replace(/\.\d+$/, "");
-  // 타임존 없으면 KST(+09:00)로 간주 (UTC로 읽혀 9시간 밀리는 것 방지)
+  // DB DATETIME은 UTC 저장 — 오프셋 없으면 UTC(Z)로 해석
   if (!/[zZ]|[+-]\d{2}:?\d{2}$/.test(s)) {
-    s += "+09:00";
+    s += "Z";
   }
   return Date.parse(s);
 }
 
-function formatRelativeTime(regDate) {
-  if (!regDate) return "";
-  const t = parseServerDate(regDate);
-  if (Number.isNaN(t)) return String(regDate).slice(0, 16);
+function formatRelativeTime(regDate, regAt) {
+  if (!regDate && (regAt == null || regAt === "")) return "";
+  const t = parseServerDate(regDate, regAt);
+  if (Number.isNaN(t)) return String(regDate || "").slice(0, 16);
   const diff = Date.now() - t;
   const m = Math.floor(diff / 60000);
   if (m < 1) return "방금";
@@ -570,12 +891,12 @@ function formatRelativeTime(regDate) {
   if (h < 24) return `${h}시간`;
   const d = Math.floor(h / 24);
   if (d < 7) return `${d}일`;
-  return formatKoreanDate(regDate);
+  return formatKoreanDate(regDate, regAt);
 }
 
-function formatKoreanDate(regDate) {
-  const t = parseServerDate(regDate);
-  if (Number.isNaN(t)) return String(regDate).slice(0, 16);
+function formatKoreanDate(regDate, regAt) {
+  const t = parseServerDate(regDate, regAt);
+  if (Number.isNaN(t)) return String(regDate || "").slice(0, 16);
   return new Intl.DateTimeFormat("ko-KR", {
     timeZone: "Asia/Seoul",
     year: "numeric",
@@ -594,8 +915,11 @@ function categoryLabel(cat) {
 function threadCardHtml(p, { showCategory = false } = {}) {
   const name = p.nickname || p.memberId || "익명";
   const letter = String(name).charAt(0);
-  const place = p.locationTitle
-    ? `<span class="thread-place">${escapeHtml(p.locationTitle)}${p.address ? ` · ${escapeHtml(p.address)}` : ""}</span>`
+  const locationTitle = postField(p, "locationTitle");
+  const address = postField(p, "address");
+  const content = postField(p, "content");
+  const place = locationTitle
+    ? `<span class="thread-place">${escapeHtml(locationTitle)}${address ? ` · ${escapeHtml(address)}` : ""}</span>`
     : "";
   const media = p.imageUrl
     ? `<div class="thread-media"><img src="${escapeHtml(p.imageUrl)}" alt="" loading="lazy" /></div>`
@@ -611,17 +935,17 @@ function threadCardHtml(p, { showCategory = false } = {}) {
         <div class="thread-head">
           <span class="thread-name">${escapeHtml(name)}</span>
           <span class="thread-handle">@${escapeHtml(p.memberId || "")}</span>
-          <span class="thread-time">· ${escapeHtml(formatRelativeTime(p.regDate))}</span>
+          <span class="thread-time">· ${escapeHtml(formatRelativeTime(p.regDate, p.regAt))}</span>
           ${cat}
         </div>
         ${place}
-        <p class="thread-text">${escapeHtml(p.content || "")}</p>
+        <p class="thread-text">${escapeHtml(content || "")}</p>
         ${media}
         <div class="thread-actions">
-          <button type="button" class="thread-action thread-rec ${on}" data-action="recommend" aria-label="추천">
+          <button type="button" class="thread-action thread-rec ${on}" data-action="recommend" aria-label="recommend">
             ♥ ${Number(p.recommendCount) || 0}
           </button>
-          <button type="button" class="thread-action" data-action="reply" aria-label="댓글">
+          <button type="button" class="thread-action" data-action="reply" aria-label="reply">
             💬 ${Number(p.replyCount) || 0}
           </button>
         </div>
@@ -698,6 +1022,14 @@ async function loadBoardPosts(tabId = activeTab) {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "게시글 조회 실패");
     boardPosts = data.posts || [];
+    if (uiLang === "en" && boardPosts.length) {
+      showStatus(statusElBoard, t("translating"), "info");
+      try {
+        await translatePosts(boardPosts);
+      } catch (err) {
+        console.warn(err);
+      }
+    }
     hideStatus(statusElBoard);
     renderBoardList(listEl, boardPosts);
   } catch (e) {
@@ -712,7 +1044,11 @@ async function loadMyPage() {
 
   if (!currentMemberId()) {
     hideStatus(statusElBoard);
-    listEl.innerHTML = `<li class="empty-state">로그인하면 내가 쓴 글과 추천한 글을 볼 수 있습니다.</li>`;
+    listEl.innerHTML = `<li class="empty-state">${
+      uiLang === "en"
+        ? "Sign in to see your posts and liked posts."
+        : "로그인하면 내가 쓴 글과 추천한 글을 볼 수 있습니다."
+    }</li>`;
     return;
   }
 
@@ -723,19 +1059,31 @@ async function loadMyPage() {
     qs.set("author", currentMemberId());
   }
 
-  showStatus(statusElBoard, "불러오는 중…", "info");
+  showStatus(statusElBoard, uiLang === "en" ? "Loading…" : "불러오는 중…", "info");
   try {
     const res = await fetch(`/api/posts?${qs}`);
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "조회 실패");
     boardPosts = data.posts || [];
+    if (uiLang === "en" && boardPosts.length) {
+      showStatus(statusElBoard, t("translating"), "info");
+      try {
+        await translatePosts(boardPosts);
+      } catch (err) {
+        console.warn(err);
+      }
+    }
     hideStatus(statusElBoard);
     renderBoardList(listEl, boardPosts, {
       showCategory: true,
       emptyText:
         myView === "liked"
-          ? "아직 추천한 글이 없습니다. 피드에서 ♥를 눌러 보세요."
-          : "아직 작성한 글이 없습니다. 글쓰기로 남겨 보세요.",
+          ? uiLang === "en"
+            ? "No liked posts yet. Tap ♥ on the feed."
+            : "아직 추천한 글이 없습니다. 피드에서 ♥를 눌러 보세요."
+          : uiLang === "en"
+            ? "You have not written any posts yet."
+            : "아직 작성한 글이 없습니다. 글쓰기로 남겨 보세요.",
     });
   } catch (e) {
     showStatus(statusElBoard, e.message || "오류", "error");
@@ -757,6 +1105,24 @@ async function openDetail(postId) {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "조회 실패");
     currentDetail = data;
+    if (uiLang === "en") {
+      try {
+        await translatePosts([currentDetail]);
+        const replies = currentDetail.replies || [];
+        const need = replies.filter((r) => !r._enContent && r.content);
+        if (need.length) {
+          const tr = await translateBatch(
+            need.map((r) => r.content || ""),
+            "EN"
+          );
+          need.forEach((r, i) => {
+            r._enContent = tr[i] || r.content;
+          });
+        }
+      } catch (err) {
+        console.warn(err);
+      }
+    }
     renderDetail();
     detailDialog.showModal();
   } catch (e) {
@@ -772,13 +1138,15 @@ function renderDetail() {
     : "";
   detailBody.innerHTML = `
     ${img}
-    <h2 class="detail-title">${escapeHtml(p.locationTitle || "장소 미정")}</h2>
-    <p class="detail-meta">${escapeHtml(p.nickname || p.memberId)} · ${escapeHtml(formatKoreanDate(p.regDate || ""))}</p>
-    <p class="detail-meta">${escapeHtml(p.address || "")}</p>
-    <p class="detail-content">${escapeHtml(p.content || "")}</p>
-    <p class="detail-meta">추천 ${p.recommendCount} · 댓글 ${(p.replies || []).length}</p>
+    <h2 class="detail-title">${escapeHtml(postField(p, "locationTitle") || (uiLang === "en" ? "Untitled place" : "장소 미정"))}</h2>
+    <p class="detail-meta">${escapeHtml(p.nickname || p.memberId)} · ${escapeHtml(formatKoreanDate(p.regDate || "", p.regAt))}</p>
+    <p class="detail-meta">${escapeHtml(postField(p, "address") || "")}</p>
+    <p class="detail-content">${escapeHtml(postField(p, "content") || "")}</p>
+    <p class="detail-meta">${uiLang === "en" ? "Likes" : "추천"} ${p.recommendCount} · ${uiLang === "en" ? "Comments" : "댓글"} ${(p.replies || []).length}</p>
   `;
-  recommendBtn.textContent = p.recommended ? `추천 취소 (${p.recommendCount})` : `추천 (${p.recommendCount})`;
+  recommendBtn.textContent = p.recommended
+    ? `${uiLang === "en" ? "Unlike" : "추천 취소"} (${p.recommendCount})`
+    : `${uiLang === "en" ? "Like" : "추천"} (${p.recommendCount})`;
   recommendBtn.classList.toggle("on", !!p.recommended);
 
   const isOwner = !!(currentUser && p.memberId && currentUser.memberId === p.memberId);
@@ -792,11 +1160,11 @@ function renderDetail() {
           (r) => `
       <li class="reply-item">
         <strong>${escapeHtml(r.nickname || r.memberId)}</strong>
-        ${escapeHtml(r.content || "")}
+        ${escapeHtml((uiLang === "en" && r._enContent) || r.content || "")}
       </li>`
         )
         .join("")
-    : `<li class="reply-item">아직 댓글이 없습니다.</li>`;
+    : `<li class="reply-item">${uiLang === "en" ? "No comments yet." : "아직 댓글이 없습니다."}</li>`;
 }
 
 function escapeHtml(s) {
@@ -1179,6 +1547,36 @@ document.querySelectorAll(".my-subtab").forEach((btn) => {
   btn.addEventListener("click", () => setMyView(btn.dataset.myView));
 });
 
+async function setUiLang(lang) {
+  uiLang = lang === "en" ? "en" : "ko";
+  localStorage.setItem(LANG_STORAGE_KEY, uiLang);
+  syncLangButtons();
+  applyChromeI18n();
+  renderAuthBar();
+  try {
+    if (activeTab === "ai") {
+      if (uiLang === "en" && currentGems.length) {
+        showStatus(statusEl, t("translating"), "info");
+        await translateCurrentGems();
+        hideStatus(statusEl);
+      }
+      renderGems(currentGems);
+    } else if (activeTab === "domestic" || activeTab === "foreign") {
+      await loadBoardPosts(activeTab);
+    } else if (activeTab === "my") {
+      await loadMyPage();
+    }
+  } catch (err) {
+    alert(err.message || (uiLang === "en" ? "Translation failed" : "번역 실패"));
+  }
+}
+
+document.querySelectorAll(".lang-btn").forEach((btn) => {
+  btn.addEventListener("click", () => setUiLang(btn.dataset.lang));
+});
+
 currentUser = loadStoredUser();
 renderAuthBar();
+syncLangButtons();
+applyChromeI18n();
 loadRegions().then(() => loadHiddenGems());

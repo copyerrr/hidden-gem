@@ -523,6 +523,30 @@ body {
   background: var(--surface);
 }
 
+.lang-toggle {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+  margin-right: 0.25rem;
+}
+
+.lang-btn {
+  border: none;
+  background: transparent;
+  padding: 0.2rem 0.55rem;
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.lang-btn.active {
+  background: var(--text);
+  color: #fff;
+}
+
 .auth-label {
   font-size: 0.78rem;
   color: var(--muted);
@@ -1030,6 +1054,19 @@ body {
   overflow: hidden;
   background: var(--bg);
   border: 1px solid var(--border);
+  cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.15s, transform 0.15s;
+}
+
+.nearby-card:hover {
+  border-color: var(--accent-dark);
+  box-shadow: var(--shadow);
+  transform: translateY(-1px);
+}
+
+.nearby-card:focus-visible {
+  outline: 2px solid var(--accent-dark);
+  outline-offset: 2px;
 }
 
 .nearby-thumb {

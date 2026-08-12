@@ -25,7 +25,7 @@ fi
 
 echo "[1/2] Compiling..."
 javac -encoding UTF-8 -d build -cp lib/mysql-connector-j.jar \
-  HiddenGemServer.java BoardDb.java BoardApi.java || exit 1
+  HiddenGemServer.java BoardDb.java BoardApi.java DeepLClient.java || exit 1
 
 if command -v netstat >/dev/null 2>&1; then
   if netstat -ano 2>/dev/null | grep -q ':8080.*LISTENING'; then

@@ -119,13 +119,16 @@ public class HiddenGemServer {
         server.createContext("/api/regions", HiddenGemServer::handleRegions);
         server.createContext("/api/login", BoardApi::handleLogin);
         server.createContext("/api/register", BoardApi::handleRegister);
+        server.createContext("/api/translate", BoardApi::handleTranslate);
         server.createContext("/api/upload", BoardApi::handleUpload);
         server.createContext("/uploads", BoardApi::handleUploads);
         server.createContext("/api/posts", BoardApi::handlePosts);
+        server.createContext("/api/traffic", HiddenGemServer::handleTraffic);
         server.setExecutor(Executors.newFixedThreadPool(8));
         server.start();
 
         System.out.println("히든젬 서버 시작 → http://localhost:" + PORT);
+        System.out.println("KorService2 트래픽 조회 → http://localhost:" + PORT + "/api/traffic");
         try {
             try (var ignored = BoardDb.open()) {
                 System.out.println("DB 연결 OK (게시판 API 활성)");
@@ -188,18 +191,23 @@ public class HiddenGemServer {
         }
         try {
             Map<String, String> qmap = query(ex.getRequestURI());
+            String contentId = qmap.getOrDefault("contentId", "").trim();
             String resNm = qmap.getOrDefault("resNm", "").trim();
             String sido = qmap.getOrDefault("sido", "").trim();
             String gungu = qmap.getOrDefault("gungu", "").trim();
-            if (resNm.isBlank()) {
+            if (contentId.isBlank() && resNm.isBlank()) {
                 respond(ex, 400, "application/json; charset=utf-8",
-                        jsonError("resNm required").getBytes(StandardCharsets.UTF_8));
+                        jsonError("resNm or contentId required").getBytes(StandardCharsets.UTF_8));
                 return;
             }
-            String cacheKey = resNm + "|" + sido + "|" + gungu;
+            String cacheKey = !contentId.isBlank()
+                    ? "cid:" + contentId
+                    : resNm + "|" + sido + "|" + gungu;
             String body = PLACE_DETAIL_CACHE.get(cacheKey);
             if (body == null) {
-                body = buildPlaceDetailJson(resNm, sido, gungu);
+                body = !contentId.isBlank()
+                        ? buildPlaceDetailByContentId(contentId, resNm)
+                        : buildPlaceDetailJson(resNm, sido, gungu);
                 PLACE_DETAIL_CACHE.put(cacheKey, body);
             }
             respond(ex, 200, "application/json; charset=utf-8", body.getBytes(StandardCharsets.UTF_8));
@@ -207,6 +215,36 @@ public class HiddenGemServer {
             respond(ex, 502, "application/json; charset=utf-8",
                     jsonError(e.getMessage()).getBytes(StandardCharsets.UTF_8));
         }
+    }
+
+    private static void handleTraffic(HttpExchange ex) throws IOException {
+        if ("POST".equalsIgnoreCase(ex.getRequestMethod())) {
+            Map<String, String> q = query(ex.getRequestURI());
+            if ("1".equals(q.get("reset")) || "true".equalsIgnoreCase(q.get("reset"))) {
+                resetKorTrafficCounterOnly();
+            }
+            respond(ex, 200, "application/json; charset=utf-8",
+                    "{\"ok\":true,\"total\":0}".getBytes(StandardCharsets.UTF_8));
+            return;
+        }
+        if (!"GET".equalsIgnoreCase(ex.getRequestMethod())) {
+            respond(ex, 405, "application/json; charset=utf-8", jsonError("GET or POST").getBytes(StandardCharsets.UTF_8));
+            return;
+        }
+        StringBuilder sb = new StringBuilder("{\"total\":").append(korTotal()).append(",\"ops\":{");
+        boolean first = true;
+        for (Map.Entry<String, Integer> e : snapshotTraffic().entrySet()) {
+            if ("TOTAL".equals(e.getKey())) {
+                continue;
+            }
+            if (!first) {
+                sb.append(',');
+            }
+            first = false;
+            sb.append(q(e.getKey())).append(':').append(e.getValue());
+        }
+        sb.append("}}");
+        respond(ex, 200, "application/json; charset=utf-8", sb.toString().getBytes(StandardCharsets.UTF_8));
     }
 
     private static void handleRegions(HttpExchange ex) throws IOException {
@@ -547,6 +585,19 @@ public class HiddenGemServer {
         return buildPlaceDetailJson(resNm, sido, gungu, true);
     }
 
+    /** contentId로 바로 상세 조회 (근처 장소 클릭용) */
+    private static String buildPlaceDetailByContentId(String contentId, String fallbackName) throws Exception {
+        SearchHit hit = new SearchHit(
+                contentId,
+                "",
+                fallbackName == null ? "" : fallbackName,
+                "",
+                "",
+                "",
+                null);
+        return buildPlaceDetailFromHit(hit, firstNonBlank(fallbackName, "장소"), "", "");
+    }
+
     /** @param reuseContentId true면 썸네일에서 찾은 contentId 재사용 (운영 기본) */
     private static String buildPlaceDetailJson(String resNm, String sido, String gungu, boolean reuseContentId)
             throws Exception {
@@ -564,7 +615,11 @@ public class HiddenGemServer {
             return "{\"found\":false,\"resNm\":" + q(resNm) + ",\"sido\":" + q(sido)
                     + ",\"message\":" + q("관광공사 DB에서 장소를 찾지 못했습니다.") + "}";
         }
+        return buildPlaceDetailFromHit(hit, resNm, sido, gungu);
+    }
 
+    private static String buildPlaceDetailFromHit(SearchHit hit, String resNm, String sido, String gungu)
+            throws Exception {
         Map<String, String> common = fetchDetailCommon(hit.contentId);
         String contentTypeId = firstNonBlank(common.get("contenttypeid"), hit.contentTypeId);
         Map<String, String> intro = fetchDetailIntro(hit.contentId, contentTypeId);
@@ -580,6 +635,13 @@ public class HiddenGemServer {
         String mapx = firstNonBlank(common.get("mapx"), hit.mapx);
         String mapy = firstNonBlank(common.get("mapy"), hit.mapy);
         String tel = firstNonBlank(intro.get("infocenter"), intro.get("infocenterfood"), common.get("tel"));
+
+        // 사진·기본 정보가 없으면 상세 실패로 처리 (목록/근처에서 걸러짐)
+        if (image == null || image.isBlank() || title.isBlank()) {
+            return "{\"found\":false,\"resNm\":" + q(resNm) + ",\"sido\":" + q(sido)
+                    + ",\"contentId\":" + q(hit.contentId)
+                    + ",\"message\":" + q("사진 또는 상세 정보가 없어 표시하지 않습니다.") + "}";
+        }
 
         List<String[]> infoRows = new ArrayList<>();
         addInfoRow(infoRows, "이용시간", firstNonBlank(intro.get("usetime"), intro.get("opentimefood"), intro.get("opentime")));
@@ -774,7 +836,8 @@ public class HiddenGemServer {
         try {
             StringBuilder url = new StringBuilder(KOR_SERVICE_BASE).append("/locationBasedList2?");
             url.append("serviceKey=").append(enc(tourServiceKeyRaw()));
-            url.append("&numOfRows=").append(Math.max(limit * 2, 12));
+            // 사진 없는 항목을 걸러내므로 후보를 더 가져옴
+            url.append("&numOfRows=").append(Math.max(limit * 4, 24));
             url.append("&pageNo=1&MobileOS=ETC&MobileApp=HiddenGem&_type=xml&arrange=E");
             url.append("&mapX=").append(enc(mapx));
             url.append("&mapY=").append(enc(mapy));
@@ -786,17 +849,22 @@ public class HiddenGemServer {
             for (int i = 0; i < items.getLength() && out.size() < limit; i++) {
                 Element item = (Element) items.item(i);
                 String cid = childText(item, "contentid");
-                if (cid.equals(excludeContentId)) {
+                if (cid.isBlank() || cid.equals(excludeContentId)) {
                     continue;
                 }
                 String title = childText(item, "title");
                 if (title.isBlank()) {
                     continue;
                 }
+                String image = imageFromItem(item);
+                if (image == null || image.isBlank()) {
+                    continue; // 사진 없는 근처 장소는 제외
+                }
+                String addr = childText(item, "addr1");
                 out.add(new NearbyPlace(
                         title,
-                        childText(item, "addr1"),
-                        imageFromItem(item),
+                        addr,
+                        image,
                         parseDouble(childText(item, "dist")),
                         cid));
             }

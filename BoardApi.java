@@ -4,6 +4,7 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
@@ -63,6 +64,46 @@ public final class BoardApi {
             json(ex, 400, error(e.getMessage()));
         } catch (Exception e) {
             json(ex, 500, error(e.getMessage()));
+        }
+    }
+
+    /** POST { texts: string[], targetLang?: "EN"|"KO" } → { translations: string[] } */
+    public static void handleTranslate(HttpExchange ex) throws IOException {
+        if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) {
+            json(ex, 405, error("POST only"));
+            return;
+        }
+        try {
+            if (!DeepLClient.isConfigured()) {
+                json(ex, 503, error("DeepL API 키가 없습니다. db.properties 에 deepl.api.key 를 넣으세요."));
+                return;
+            }
+            String raw = readBody(ex);
+            Map<String, String> body = parseJson(raw);
+            String target = body.getOrDefault("targetLang", "EN");
+            List<String> texts = extractJsonStringArray(raw, "texts");
+            if (texts.isEmpty()) {
+                json(ex, 400, error("texts 배열이 필요합니다."));
+                return;
+            }
+            if (texts.size() > 80) {
+                json(ex, 400, error("한 번에 80개까지만 번역할 수 있습니다."));
+                return;
+            }
+            List<String> translations = DeepLClient.translate(texts, target);
+            StringBuilder sb = new StringBuilder("{\"translations\":[");
+            for (int i = 0; i < translations.size(); i++) {
+                if (i > 0) {
+                    sb.append(',');
+                }
+                sb.append(q(translations.get(i)));
+            }
+            sb.append("]}");
+            json(ex, 200, sb.toString());
+        } catch (IllegalArgumentException e) {
+            json(ex, 400, error(e.getMessage()));
+        } catch (Exception e) {
+            json(ex, 502, error(e.getMessage()));
         }
     }
 
@@ -359,6 +400,7 @@ public final class BoardApi {
                 .append(",\"content\":").append(q(str(post.get("content"))))
                 .append(",\"category\":").append(q(str(post.get("category"))))
                 .append(",\"regDate\":").append(q(str(post.get("regDate"))))
+                .append(",\"regAt\":").append(post.get("regAt") == null ? "null" : post.get("regAt"))
                 .append(",\"locationId\":").append(post.get("locationId") == null ? "null" : post.get("locationId"))
                 .append(",\"locationTitle\":").append(q(str(post.get("locationTitle"))))
                 .append(",\"address\":").append(q(str(post.get("address"))))
@@ -379,12 +421,72 @@ public final class BoardApi {
                         .append(",\"nickname\":").append(q(str(r.get("nickname"))))
                         .append(",\"content\":").append(q(str(r.get("content"))))
                         .append(",\"regDate\":").append(q(str(r.get("regDate"))))
+                        .append(",\"regAt\":").append(r.get("regAt") == null ? "null" : r.get("regAt"))
                         .append('}');
             }
             sb.append(']');
         }
         sb.append('}');
         return sb.toString();
+    }
+
+    private static List<String> extractJsonStringArray(String body, String key) {
+        List<String> out = new ArrayList<>();
+        if (body == null || key == null) {
+            return out;
+        }
+        String needle = "\"" + key + "\"";
+        int k = body.indexOf(needle);
+        if (k < 0) {
+            return out;
+        }
+        int bracket = body.indexOf('[', k + needle.length());
+        if (bracket < 0) {
+            return out;
+        }
+        int i = bracket + 1;
+        while (i < body.length()) {
+            char c = body.charAt(i);
+            if (c == ']') {
+                break;
+            }
+            if (c == '"') {
+                StringBuilder sb = new StringBuilder();
+                i++;
+                while (i < body.length()) {
+                    char ch = body.charAt(i);
+                    if (ch == '\\' && i + 1 < body.length()) {
+                        char n = body.charAt(++i);
+                        if (n == 'n') {
+                            sb.append('\n');
+                        } else if (n == 't') {
+                            sb.append('\t');
+                        } else if (n == 'r') {
+                            sb.append('\r');
+                        } else if (n == '"') {
+                            sb.append('"');
+                        } else if (n == '\\') {
+                            sb.append('\\');
+                        } else if (n == 'u' && i + 4 < body.length()) {
+                            sb.append((char) Integer.parseInt(body.substring(i + 1, i + 5), 16));
+                            i += 4;
+                        } else {
+                            sb.append(n);
+                        }
+                    } else if (ch == '"') {
+                        i++;
+                        break;
+                    } else {
+                        sb.append(ch);
+                    }
+                    i++;
+                }
+                out.add(sb.toString());
+                continue;
+            }
+            i++;
+        }
+        return out;
     }
 
     private static String extensionFor(String contentType, byte[] bytes) {

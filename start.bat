@@ -25,7 +25,7 @@ if not exist lib\mysql-connector-j.jar (
 )
 
 echo [1/2] Compiling...
-javac -encoding UTF-8 -d build -cp lib\mysql-connector-j.jar HiddenGemServer.java BoardDb.java BoardApi.java
+javac -encoding UTF-8 -d build -cp lib\mysql-connector-j.jar HiddenGemServer.java BoardDb.java BoardApi.java DeepLClient.java
 if errorlevel 1 (
     echo.
     echo Compile failed. Check Java JDK installation.

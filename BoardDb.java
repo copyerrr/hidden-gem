@@ -8,8 +8,10 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
-import java.sql.Timestamp;
+import java.time.Instant;
+import java.time.LocalDateTime;
 import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -457,7 +459,8 @@ public final class BoardDb {
                     row.put("memberId", rs.getString("member_id"));
                     row.put("nickname", nullToEmpty(rs.getString("nickname")));
                     row.put("content", nullToEmpty(rs.getString("reply_content")));
-                    row.put("regDate", formatRegDate(rs.getTimestamp("reg_date")));
+                    row.put("regDate", formatRegDate(rs, "reg_date"));
+                    row.put("regAt", readRegAtMillis(rs, "reg_date"));
                     list.add(row);
                 }
             }
@@ -472,7 +475,8 @@ public final class BoardDb {
         row.put("nickname", nullToEmpty(rs.getString("nickname")));
         row.put("content", nullToEmpty(rs.getString("content")));
         row.put("category", normalizeCategory(rs.getString("category")));
-        row.put("regDate", formatRegDate(rs.getTimestamp("reg_date")));
+        row.put("regDate", formatRegDate(rs, "reg_date"));
+        row.put("regAt", readRegAtMillis(rs, "reg_date"));
         long locId = rs.getLong("location_id");
         row.put("locationId", rs.wasNull() ? null : locId);
         row.put("locationTitle", nullToEmpty(rs.getString("location_title")));
@@ -483,12 +487,35 @@ public final class BoardDb {
         return row;
     }
 
-    /** 한국시간(+09:00) ISO 문자열 — 프론트 상대시간이 UTC로 어긋나지 않게 */
-    private static String formatRegDate(Timestamp ts) {
-        if (ts == null) {
+    /**
+     * RDS DATETIME은 UTC 벽시계로 저장됨(세션 time_zone=UTC).
+     * getTimestamp()+Asia/Seoul 해석하면 9시간 밀리므로 문자열을 UTC Instant로 읽는다.
+     */
+    private static Instant readRegInstant(ResultSet rs, String column) throws SQLException {
+        String raw = rs.getString(column);
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        String s = raw.trim();
+        if (s.length() >= 19) {
+            s = s.substring(0, 19);
+        }
+        LocalDateTime ldt = LocalDateTime.parse(s.replace(' ', 'T'));
+        return ldt.toInstant(ZoneOffset.UTC);
+    }
+
+    private static Long readRegAtMillis(ResultSet rs, String column) throws SQLException {
+        Instant instant = readRegInstant(rs, column);
+        return instant == null ? null : instant.toEpochMilli();
+    }
+
+    /** 한국시간(+09:00) 표시용 */
+    private static String formatRegDate(ResultSet rs, String column) throws SQLException {
+        Instant instant = readRegInstant(rs, column);
+        if (instant == null) {
             return "";
         }
-        return ts.toInstant().atZone(KST).format(REG_DATE_FMT);
+        return instant.atZone(KST).format(REG_DATE_FMT);
     }
 
     private static String normalizeCategory(String category) {
