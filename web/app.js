@@ -417,7 +417,7 @@ function applyThumbnails(thumbnails) {
 }
 
 async function loadThumbnails(gems) {
-  if (!gems.length) return {};
+  if (!gems.length) return { thumbnails: {}, apiLimited: false };
   const body = gems.map((g) => `${g.resNm}\t${g.sido || ""}`).join("\n");
   try {
     const res = await fetch("/api/thumbnails", {
@@ -426,15 +426,15 @@ async function loadThumbnails(gems) {
       body,
     });
     const data = await res.json();
-    if (!res.ok) return {};
+    if (!res.ok) return { thumbnails: {}, apiLimited: !!data.apiLimited };
     const thumbnails = data.thumbnails || {};
     for (const gem of gems) {
       const url = thumbnails[gemKey(gem)];
       if (url) gem.thumbnail = url;
     }
-    return thumbnails;
+    return { thumbnails, apiLimited: !!data.apiLimited };
   } catch {
-    return {};
+    return { thumbnails: {}, apiLimited: false };
   }
 }
 
@@ -521,22 +521,31 @@ async function loadHiddenGems() {
 
     showStatus(
       statusEl,
-      uiLang === "en" ? "Checking photos & details…" : "사진·상세 정보가 있는 장소만 추리는 중…",
+      uiLang === "en" ? "Loading AI picks" : "AI 계산중",
       "info"
     );
-    await loadThumbnails(gems);
+    const thumbMeta = await loadThumbnails(gems);
     await prefetchPlaceDetails(gems);
 
-    gems = gems.filter((g) => {
+    const showLimit = Number(DEFAULT_LIMIT) || 30;
+    const enriched = gems.filter((g) => {
       if (!g.thumbnail) return false;
       const detail = placeDetailCache.get(gemKey(g));
       return !!(detail && detail.found === true);
     });
 
-    // 화면에 너무 많이 안 나오게 상위 N개만
-    const showLimit = Number(DEFAULT_LIMIT) || 30;
-    if (gems.length > showLimit) {
-      gems = gems.slice(0, showLimit);
+    let apiLimited =
+      !!(thumbMeta && thumbMeta.apiLimited) ||
+      [...placeDetailCache.values()].some((d) => d && d.apiLimited);
+
+    if (enriched.length) {
+      gems = enriched.length > showLimit ? enriched.slice(0, showLimit) : enriched;
+    } else if (apiLimited || gems.length) {
+      // 한도 초과·API 실패 시 빈 화면 대신 통계 목록이라도 표시
+      gems = gems.length > showLimit ? gems.slice(0, showLimit) : gems;
+      apiLimited = true;
+    } else {
+      gems = [];
     }
 
     currentGems = gems;
@@ -548,7 +557,17 @@ async function loadHiddenGems() {
         console.warn(err);
       }
     }
-    hideStatus(statusEl);
+    if (apiLimited && currentGems.length && !enriched.length) {
+      showStatus(
+        statusEl,
+        uiLang === "en"
+          ? "Tour API daily quota exceeded — showing names/stats only. Photos return tomorrow (or with an upgraded key)."
+          : "관광공사 API 일일 호출 한도 초과 — 이름·통계만 표시합니다. 사진·상세는 내일(또는 운영계정)에 다시 불러올 수 있습니다.",
+        "error"
+      );
+    } else {
+      hideStatus(statusEl);
+    }
     renderGems(currentGems);
     if (!currentGems.length) {
       resultsEl.innerHTML = "";
@@ -733,14 +752,19 @@ async function openNearbyPlace(place) {
 
 function renderPlaceDetail(gem, data) {
   const location = displayGemLocation(gem);
-  const title =
-    uiLang === "en"
-      ? data.titleEn || data.title || displayGemName(gem)
-      : data.found
-        ? data.title || gem.resNm
-        : gem.resNm;
+  const title = displayGemName(gem);
   const letter = (title || "?").charAt(0);
   const heroImg = data.image || gem.thumbnail;
+  const apiTitle =
+    uiLang === "en"
+      ? data.titleEn || data.title || ""
+      : data.title || "";
+  // 관광공사 명칭이 통계명과 다를 때만 보조로 표시 (오매칭 상호는 숨김)
+  const showApiTitle =
+    apiTitle &&
+    apiTitle.replace(/\s+/g, "") !== String(gem.resNm || "").replace(/\s+/g, "") &&
+    (String(apiTitle).includes(String(gem.resNm || "").slice(0, 4)) ||
+      String(gem.resNm || "").includes(String(apiTitle).slice(0, 4)));
 
   if (!data.found) {
     placeBody.innerHTML = `
@@ -792,6 +816,11 @@ function renderPlaceDetail(gem, data) {
       <header>
         <p class="place-kicker">${escapeHtml(addr || location || "")}</p>
         <h2 class="place-title">${escapeHtml(title)}</h2>
+        ${
+          showApiTitle
+            ? `<p class="place-api-title">${escapeHtml(apiTitle)}</p>`
+            : ""
+        }
         <div class="place-stats">
           <span class="place-chip">${t("foreignVisitors")} ${formatNum(gem.foreignVisitors)}</span>
           <span class="place-chip">${t("domesticVisitors")} ${formatNum(gem.domesticVisitors)}</span>

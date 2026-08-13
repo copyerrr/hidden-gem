@@ -73,12 +73,13 @@ public class HiddenGemServer {
             Map.entry("해녀박물관", List.of("제주해녀박물관", "해녀박물관")),
             Map.entry("노보텔부산", List.of("노보텔 부산", "노보텔 앰배서더 부산")),
             Map.entry("헌릉인릉", List.of("헌릉", "인릉")),
-            Map.entry("용인대장금파크", List.of("대장금파크", "용인 대장금파크")),
-            Map.entry("대장금파크", List.of("대장금파크", "용인 대장금파크")),
+            Map.entry("용인대장금파크", List.of("대장금파크", "용인대장금파크", "MBC드라마서커스용인대장금파크")),
+            Map.entry("대장금파크", List.of("대장금파크", "용인대장금파크")),
             Map.entry("구리시고구려대장간마을", List.of("고구려대장간마을")),
             Map.entry("고구려대장간마을", List.of("고구려대장간마을")),
             Map.entry("태릉강릉조선왕릉전시관", List.of("태릉", "강릉", "조선왕릉")),
-            Map.entry("한국전통음식문화체험관", List.of("정강원", "한국전통음식문화체험관")),
+            // '정강원'만 쓰면 정강원 관광농원 등으로 오매칭됨 — 공식명 위주
+            Map.entry("한국전통음식문화체험관", List.of("한국전통음식문화체험관")),
             Map.entry("골드힐카운티", List.of("골드힐")),
             Map.entry("설악파크", List.of("설악파크")),
             Map.entry("달곁에별", List.of("달곁에별")));
@@ -96,6 +97,9 @@ public class HiddenGemServer {
     /** KorService2 호출 횟수 (벤치마크용) */
     private static final Map<String, java.util.concurrent.atomic.AtomicInteger> KOR_TRAFFIC =
             new ConcurrentHashMap<>();
+    /** 일일 호출 한도 초과 시 true — 자정 리셋 전까지 사진/상세 enrichment 불가 */
+    private static final java.util.concurrent.atomic.AtomicBoolean KOR_API_LIMITED =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
     /** 한 번에 전체 1260건을 받으면 Read timed out 나므로 페이지 단위로 받음 */
     private static final int API_PAGE_SIZE = 100;
     private static final Path CACHE_DIR = Path.of("out");
@@ -208,7 +212,10 @@ public class HiddenGemServer {
                 body = !contentId.isBlank()
                         ? buildPlaceDetailByContentId(contentId, resNm)
                         : buildPlaceDetailJson(resNm, sido, gungu);
-                PLACE_DETAIL_CACHE.put(cacheKey, body);
+                // 한도 초과 실패는 캐시하지 않음 (한도 해제 후 재시도 가능)
+                if (body == null || !body.contains("\"apiLimited\":true")) {
+                    PLACE_DETAIL_CACHE.put(cacheKey, body);
+                }
             }
             respond(ex, 200, "application/json; charset=utf-8", body.getBytes(StandardCharsets.UTF_8));
         } catch (Exception e) {
@@ -231,7 +238,9 @@ public class HiddenGemServer {
             respond(ex, 405, "application/json; charset=utf-8", jsonError("GET or POST").getBytes(StandardCharsets.UTF_8));
             return;
         }
-        StringBuilder sb = new StringBuilder("{\"total\":").append(korTotal()).append(",\"ops\":{");
+        StringBuilder sb = new StringBuilder("{\"total\":").append(korTotal())
+                .append(",\"apiLimited\":").append(KOR_API_LIMITED.get())
+                .append(",\"ops\":{");
         boolean first = true;
         for (Map.Entry<String, Integer> e : snapshotTraffic().entrySet()) {
             if ("TOTAL".equals(e.getKey())) {
@@ -577,7 +586,11 @@ public class HiddenGemServer {
             first = false;
             sb.append(q(e.getKey())).append(':').append(q(e.getValue()));
         }
-        sb.append("}}");
+        sb.append("}");
+        if (KOR_API_LIMITED.get()) {
+            sb.append(",\"apiLimited\":true");
+        }
+        sb.append('}');
         return sb.toString();
     }
 
@@ -612,6 +625,10 @@ public class HiddenGemServer {
             }
         }
         if (hit == null || hit.contentId.isBlank()) {
+            if (KOR_API_LIMITED.get()) {
+                return "{\"found\":false,\"apiLimited\":true,\"resNm\":" + q(resNm) + ",\"sido\":" + q(sido)
+                        + ",\"message\":" + q("관광공사 API 일일 호출 한도를 초과했습니다. 내일 다시 시도해 주세요.") + "}";
+            }
             return "{\"found\":false,\"resNm\":" + q(resNm) + ",\"sido\":" + q(sido)
                     + ",\"message\":" + q("관광공사 DB에서 장소를 찾지 못했습니다.") + "}";
         }
@@ -716,6 +733,9 @@ public class HiddenGemServer {
     }
 
     private static SearchHit resolveSearchHit(String resNm, String sido, String gungu) {
+        if (KOR_API_LIMITED.get()) {
+            return null;
+        }
         for (String keyword : thumbnailSearchKeywords(resNm, sido, gungu)) {
             try {
                 String xml = korSearchKeyword(keyword);
@@ -726,6 +746,9 @@ public class HiddenGemServer {
                     return hit;
                 }
             } catch (Exception ignored) {
+                if (KOR_API_LIMITED.get()) {
+                    return null;
+                }
                 // next keyword
             }
         }
@@ -736,9 +759,7 @@ public class HiddenGemServer {
             Document doc, String originalName, String keyword, String sido, String gungu) {
         NodeList items = doc.getElementsByTagName("item");
         SearchHit nameAndRegion = null;
-        SearchHit anyInRegion = null;
         SearchHit nameOnly = null;
-        SearchHit any = null;
         boolean requireRegion = !sido.isBlank() || !gungu.isBlank();
 
         for (int i = 0; i < items.getLength(); i++) {
@@ -759,14 +780,8 @@ public class HiddenGemServer {
                     imageFromItem(item));
 
             boolean regionOk = regionMatches(addr1, sido, gungu);
-            boolean nameOk = namesMatch(title, originalName) || namesMatch(title, keyword);
+            boolean nameOk = titleMatchesQuery(title, originalName, keyword);
 
-            if (any == null) {
-                any = hit;
-            }
-            if (regionOk && anyInRegion == null) {
-                anyInRegion = hit;
-            }
             if (nameOk && regionOk) {
                 return hit;
             }
@@ -778,10 +793,9 @@ public class HiddenGemServer {
             }
         }
         if (requireRegion) {
-            // 시도/시군구가 있으면 다른 지역 결과로 대체하지 않음 (오매칭 방지)
-            return nameAndRegion != null ? nameAndRegion : null;
+            return nameAndRegion;
         }
-        return nameOnly != null ? nameOnly : any;
+        return nameOnly;
     }
 
     /** 주소가 요청한 시·도와 시군구에 속하는지 */
@@ -1057,6 +1071,9 @@ public class HiddenGemServer {
     }
 
     private static SearchHit lookupThumbnailHitFromApi(String resNm, String sido) throws Exception {
+        if (KOR_API_LIMITED.get()) {
+            return null;
+        }
         for (String keyword : thumbnailSearchKeywords(resNm, sido, "")) {
             try {
                 SearchHit found = searchThumbnailHit(keyword, resNm, sido);
@@ -1064,6 +1081,9 @@ public class HiddenGemServer {
                     return found;
                 }
             } catch (Exception ignored) {
+                if (KOR_API_LIMITED.get()) {
+                    return null;
+                }
                 // 다음 후보 키워드 시도
             }
         }
@@ -1180,7 +1200,6 @@ public class HiddenGemServer {
         NodeList items = doc.getElementsByTagName("item");
         SearchHit titleAndRegion = null;
         SearchHit titleOnly = null;
-        SearchHit anyWithImage = null;
         boolean requireRegion = !sido.isBlank();
 
         for (int i = 0; i < items.getLength(); i++) {
@@ -1207,11 +1226,8 @@ public class HiddenGemServer {
                     childText(item, "mapy"),
                     img);
 
-            boolean nameMatch = namesMatch(title, originalName) || namesMatch(title, keyword);
+            boolean nameMatch = titleMatchesQuery(title, originalName, keyword);
             boolean regionMatch = regionMatches(addr1, sido, "");
-            if (anyWithImage == null) {
-                anyWithImage = hit;
-            }
             if (nameMatch && regionMatch) {
                 return hit;
             }
@@ -1225,7 +1241,7 @@ public class HiddenGemServer {
         if (requireRegion) {
             return titleAndRegion;
         }
-        return titleOnly != null ? titleOnly : anyWithImage;
+        return titleOnly;
     }
 
     private static String pickImageFromSearch(Document doc, String originalName, String keyword, String sido)
@@ -1234,18 +1250,138 @@ public class HiddenGemServer {
         return hit == null ? null : hit.image;
     }
 
-    /** 띄어쓰기 무시 이름 비교 */
+    /**
+     * 원본 통계명 또는 (원본과 다른) 별칭 키워드와 제목이 맞을 때만 매칭.
+     * "정강원"→관광농원, "용인"→호텔 같은 짧은 부분일치 오매칭은 거부.
+     */
+    private static boolean titleMatchesQuery(String title, String originalName, String keyword) {
+        if (namesMatchPlace(title, originalName)) {
+            return true;
+        }
+        if (keyword == null || keyword.isBlank()) {
+            return false;
+        }
+        String compactKw = compactName(keyword);
+        String compactOrig = compactName(originalName);
+        // 검색어가 원본과 동일하면 원본 매칭만 인정 (이미 실패)
+        if (compactKw.isEmpty() || compactKw.equals(compactOrig)) {
+            return false;
+        }
+        // 별칭이 원본을 포함/확장한 경우(예: "정강원 한국전통…") → 별칭 기준으로 매칭
+        return namesMatchPlace(title, keyword);
+    }
+
+    /** 띄어쓰기 무시 이름 비교 (짧은 부분 문자열 오매칭 방지) */
     private static boolean namesMatch(String a, String b) {
+        return namesMatchPlace(a, b);
+    }
+
+    private static boolean namesMatchStrict(String a, String b) {
+        return namesMatchPlace(a, b);
+    }
+
+    private static boolean namesMatchPlace(String a, String b) {
         if (a == null || b == null || a.isBlank() || b.isBlank()) {
             return false;
         }
-        if (a.equals(b) || a.contains(b) || b.contains(a)) {
+        if (a.equals(b)) {
             return true;
         }
         String ca = compactName(a);
         String cb = compactName(b);
-        return !ca.isEmpty() && !cb.isEmpty()
-                && (ca.equals(cb) || ca.contains(cb) || cb.contains(ca));
+        if (ca.isEmpty() || cb.isEmpty()) {
+            return false;
+        }
+        if (ca.equals(cb)) {
+            return true;
+        }
+        if (softContainsName(ca, cb)) {
+            return true;
+        }
+        return significantTokensMatch(a, b);
+    }
+
+    /** 한쪽 이름이 다른 쪽에 충분히 길게 포함될 때만 */
+    private static boolean softContainsName(String ca, String cb) {
+        String shorter = ca.length() <= cb.length() ? ca : cb;
+        String longer = ca.length() <= cb.length() ? cb : ca;
+        // 3글자 이하 짧은 키워드가 긴 상호에만 들어가는 경우 차단 (정강원→관광농원 등)
+        if (shorter.length() < 4) {
+            return false;
+        }
+        if (!longer.contains(shorter)) {
+            return false;
+        }
+        return (double) shorter.length() / (double) longer.length() >= 0.4;
+    }
+
+    /**
+     * 공백으로 나뉜 핵심 토큰이 모두 상대 이름에 있으면 매칭.
+     * 예: "용인 대장금 파크" → 대장금 필수 → 용인호텔은 탈락.
+     */
+    private static boolean significantTokensMatch(String title, String original) {
+        List<String> tokens = significantNameTokens(original);
+        if (tokens.isEmpty()) {
+            return false;
+        }
+        String ct = compactName(title);
+        if (ct.isEmpty()) {
+            return false;
+        }
+        int hit = 0;
+        for (String token : tokens) {
+            String c = compactName(token);
+            if (c.length() >= 2 && ct.contains(c)) {
+                hit++;
+            }
+        }
+        if (tokens.size() == 1) {
+            return softContainsName(ct, compactName(tokens.get(0)));
+        }
+        // 토큰 2개 이상이면 전부 포함되어야 함 (약한 접미사는 이미 제거됨)
+        return hit >= tokens.size();
+    }
+
+    private static final Set<String> WEAK_NAME_TOKENS = Set.of(
+            "관광지", "공원", "파크", "랜드", "테마파크", "박물관", "미술관", "체험관", "체험장",
+            "문화관", "문화원", "타워", "센터", "마을", "시장", "해변", "해수욕장", "폭포", "온천",
+            "리조트", "호텔", "펜션", "농원", "관광농원", "세트장", "드라마", "테마", "월드",
+            "휴양림", "수목원", "식물원", "동물원", "수족관", "기념관", "전시관");
+
+    private static List<String> significantNameTokens(String name) {
+        List<String> out = new ArrayList<>();
+        if (name == null || name.isBlank()) {
+            return out;
+        }
+        for (String part : name.trim().split("[\\s·ㆍ]+")) {
+            String t = part.replaceAll("[^0-9A-Za-z가-힣]", "");
+            if (t.length() < 2) {
+                continue;
+            }
+            if (WEAK_NAME_TOKENS.contains(t)) {
+                continue;
+            }
+            out.add(t);
+        }
+        if (out.isEmpty()) {
+            String compact = compactName(name);
+            if (compact.length() >= 4) {
+                out.add(compact);
+            }
+        }
+        // 핵심 토큰이 2개 이상이면 짧은 지역명(2~3글자)은 보조로만 취급 → 필수에서 제외
+        if (out.size() >= 2) {
+            List<String> strong = new ArrayList<>();
+            for (String t : out) {
+                if (t.length() >= 4) {
+                    strong.add(t);
+                }
+            }
+            if (!strong.isEmpty()) {
+                return strong;
+            }
+        }
+        return out;
     }
 
     private static String compactName(String s) {
@@ -1350,11 +1486,24 @@ public class HiddenGemServer {
             if (err.isBlank()) {
                 err = firstTagText(doc, "resultMsg");
             }
+            markKorApiLimitedIfNeeded(code, firstTagText(doc, "returnReasonCode"), err);
             throw new IllegalStateException("API 오류 " + code + ": " + err);
         }
         String reason = firstTagText(doc, "returnReasonCode");
         if ("22".equals(reason) || (!reason.isBlank() && !"0".equals(reason) && !"00".equals(reason))) {
-            throw new IllegalStateException("API 제한 " + reason + ": " + firstTagText(doc, "returnAuthMsg"));
+            String auth = firstTagText(doc, "returnAuthMsg");
+            markKorApiLimitedIfNeeded(code, reason, auth + " " + firstTagText(doc, "errMsg"));
+            throw new IllegalStateException("API 제한 " + reason + ": " + auth);
+        }
+    }
+
+    private static void markKorApiLimitedIfNeeded(String code, String reason, String message) {
+        String msg = message == null ? "" : message.toUpperCase();
+        if ("22".equals(reason)
+                || msg.contains("LIMITED_NUMBER_OF_SERVICE_REQUESTS")
+                || msg.contains("한도")
+                || msg.contains("초과")) {
+            KOR_API_LIMITED.set(true);
         }
     }
 

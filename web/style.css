@@ -913,6 +913,12 @@ body {
   letter-spacing: -0.02em;
 }
 
+.place-api-title {
+  margin: 0.25rem 0 0;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
 .place-addr {
   margin: 0.35rem 0 0;
   font-size: 0.86rem;
