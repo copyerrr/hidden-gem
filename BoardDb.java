@@ -132,12 +132,44 @@ public final class BoardDb {
             """;
 
     public static List<Map<String, Object>> listPosts(String viewerId, String category) throws Exception {
+        return listPosts(viewerId, category, "", "");
+    }
+
+    /**
+     * @param sido 도/시 필터 (address 컬럼에 저장된 시·도, 빈 문자열이면 전체)
+     * @param q 장소명(location title) 부분 검색
+     */
+    public static List<Map<String, Object>> listPosts(
+            String viewerId, String category, String sido, String q) throws Exception {
         String cat = normalizeCategory(category);
-        String sql = POST_SELECT + """
-                WHERE p.category = ?
-                ORDER BY p.reg_date DESC, p.post_id DESC
-                """;
-        return queryPosts(sql, viewerId, ps -> ps.setString(1, cat));
+        String sidoFilter = sido == null ? "" : sido.trim();
+        String query = q == null ? "" : q.trim();
+
+        StringBuilder sql = new StringBuilder(POST_SELECT);
+        sql.append(" WHERE p.category = ? ");
+        if (!sidoFilter.isEmpty()) {
+            sql.append(" AND (")
+                    .append("COALESCE(l.address, '') = ? OR COALESCE(l.address, '') LIKE ? ")
+                    .append("OR COALESCE(l.address, '') LIKE ?")
+                    .append(") ");
+        }
+        if (!query.isEmpty()) {
+            sql.append(" AND COALESCE(l.title, '') LIKE ? ");
+        }
+        sql.append(" ORDER BY COALESCE(l.address, ''), p.reg_date DESC, p.post_id DESC ");
+
+        return queryPosts(sql.toString(), viewerId, ps -> {
+            int i = 1;
+            ps.setString(i++, cat);
+            if (!sidoFilter.isEmpty()) {
+                ps.setString(i++, sidoFilter);
+                ps.setString(i++, sidoFilter + "%");
+                ps.setString(i++, "%" + sidoFilter + "%");
+            }
+            if (!query.isEmpty()) {
+                ps.setString(i, "%" + query + "%");
+            }
+        });
     }
 
     /** 특정 회원이 쓴 글 */
@@ -221,17 +253,22 @@ public final class BoardDb {
         if (content == null || content.isBlank()) {
             throw new IllegalArgumentException("내용을 입력하세요.");
         }
+        if (address == null || address.isBlank()) {
+            throw new IllegalArgumentException("도/시를 선택하세요.");
+        }
+        if (locationTitle == null || locationTitle.isBlank()) {
+            throw new IllegalArgumentException("장소명을 입력하세요.");
+        }
         String cat = normalizeCategory(category);
         try (Connection conn = open()) {
             conn.setAutoCommit(false);
             try {
                 ensureMember(conn, memberId);
-                String title = (locationTitle == null || locationTitle.isBlank())
-                        ? "장소 미정" : locationTitle.trim();
+                String title = locationTitle.trim();
                 long locationId = insertLocation(
                         conn,
                         title,
-                        address == null ? "" : address.trim(),
+                        address.trim(),
                         imageUrl == null ? "" : imageUrl.trim());
                 long postId;
                 try (PreparedStatement ps = conn.prepareStatement(
@@ -276,6 +313,12 @@ public final class BoardDb {
         if (content == null || content.isBlank()) {
             throw new IllegalArgumentException("내용을 입력하세요.");
         }
+        if (address == null || address.isBlank()) {
+            throw new IllegalArgumentException("도/시를 선택하세요.");
+        }
+        if (locationTitle == null || locationTitle.isBlank()) {
+            throw new IllegalArgumentException("장소명을 입력하세요.");
+        }
         String cat = normalizeCategory(category);
         try (Connection conn = open()) {
             conn.setAutoCommit(false);
@@ -306,14 +349,13 @@ public final class BoardDb {
                     ps.executeUpdate();
                 }
                 if (locationId != null) {
-                    String title = (locationTitle == null || locationTitle.isBlank())
-                            ? "장소 미정" : locationTitle.trim();
-                    String addr = address == null ? "" : address.trim();
+                    String title = locationTitle.trim();
+                    String addr = address.trim();
                     if (imageUrl == null) {
                         try (PreparedStatement ps = conn.prepareStatement(
                                 "UPDATE Location SET title = ?, address = ? WHERE location_id = ?")) {
                             ps.setString(1, title);
-                            ps.setString(2, addr.isBlank() ? null : addr);
+                            ps.setString(2, addr);
                             ps.setLong(3, locationId);
                             ps.executeUpdate();
                         }
@@ -321,7 +363,7 @@ public final class BoardDb {
                         try (PreparedStatement ps = conn.prepareStatement(
                                 "UPDATE Location SET title = ?, address = ?, image_url = ? WHERE location_id = ?")) {
                             ps.setString(1, title);
-                            ps.setString(2, addr.isBlank() ? null : addr);
+                            ps.setString(2, addr);
                             ps.setString(3, imageUrl.isBlank() ? null : imageUrl.trim());
                             ps.setLong(4, locationId);
                             ps.executeUpdate();

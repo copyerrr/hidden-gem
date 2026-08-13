@@ -211,6 +211,8 @@ let authMode = "login";
 
 /** @type {Array<object>} */
 let currentGems = [];
+/** AI 탭: 검색 전 풀 목록 (API 재호출 없이 명칭 필터) */
+let aiGemsPool = [];
 /** @type {Array<object>} */
 let boardPosts = [];
 /** @type {object|null} */
@@ -223,6 +225,26 @@ const placeDetailInflight = new Map();
 const PLACE_PREFETCH_CONCURRENCY = 2;
 /** @type {{ sido: string[] } | null} */
 let regionData = null;
+/** 전국 시·도 (글쓰기·게시판 필터용). API 지역 목록이 있으면 그걸로 덮어씀 */
+const DEFAULT_SIDO_LIST = [
+  "서울특별시",
+  "부산광역시",
+  "대구광역시",
+  "인천광역시",
+  "광주광역시",
+  "대전광역시",
+  "울산광역시",
+  "세종특별자치시",
+  "경기도",
+  "강원특별자치도",
+  "충청북도",
+  "충청남도",
+  "전북특별자치도",
+  "전라남도",
+  "경상북도",
+  "경상남도",
+  "제주특별자치도",
+];
 /** @type {string|null} data URL for pending write image */
 let pendingImageDataUrl = null;
 /** @type {number|null} 수정 중인 게시글 id */
@@ -390,12 +412,14 @@ function renderGems(gems) {
   const sorted = sortGems(gems, sortSelect.value);
 
   resultsEl.innerHTML = sorted
-    .map((gem) => {
+    .map((gem, index) => {
       const location = displayGemLocation(gem);
       const name = displayGemName(gem);
       const key = gemKey(gem);
+      const rank = index + 1;
       return `
         <li class="post-item gem-item" data-key="${escapeHtml(key)}" role="button" tabindex="0">
+          <span class="gem-rank" aria-label="${rank}위">${rank}</span>
           <div class="post-thumb" aria-hidden="true">
             ${thumbHtml(gem)}
           </div>
@@ -504,6 +528,7 @@ async function loadHiddenGems() {
     let gems = data.gems || [];
     if (!gems.length) {
       currentGems = [];
+      aiGemsPool = [];
       hideStatus(statusEl);
       resultsEl.innerHTML = "";
       const li = document.createElement("li");
@@ -549,6 +574,8 @@ async function loadHiddenGems() {
     }
 
     currentGems = gems;
+    aiGemsPool = gems.slice();
+    applyGemSearchFilter();
     if (uiLang === "en" && currentGems.length) {
       showStatus(statusEl, t("translating"), "info");
       try {
@@ -557,7 +584,7 @@ async function loadHiddenGems() {
         console.warn(err);
       }
     }
-    if (apiLimited && currentGems.length && !enriched.length) {
+    if (apiLimited && aiGemsPool.length && !enriched.length) {
       showStatus(
         statusEl,
         uiLang === "en"
@@ -573,8 +600,10 @@ async function loadHiddenGems() {
       resultsEl.innerHTML = "";
       const li = document.createElement("li");
       li.className = "empty-state";
-      li.textContent =
-        uiLang === "en"
+      const q = document.getElementById("gemSearch")?.value?.trim();
+      li.textContent = q
+        ? "검색 결과가 없습니다."
+        : uiLang === "en"
           ? "No places with both photo and details were found."
           : "사진과 상세 정보가 모두 있는 추천 장소가 없습니다.";
       resultsEl.appendChild(li);
@@ -589,16 +618,60 @@ async function loadRegions() {
     const res = await fetch(`/api/regions?ym=${encodeURIComponent(DEFAULT_YM)}`);
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "지역 목록 실패");
-    regionData = { sido: data.sido || [] };
-    sidoSelect.innerHTML = `<option value="">전국</option>`;
-    for (const s of regionData.sido) {
-      const opt = document.createElement("option");
-      opt.value = s;
-      opt.textContent = s;
-      sidoSelect.appendChild(opt);
-    }
+    regionData = { sido: data.sido?.length ? data.sido : DEFAULT_SIDO_LIST.slice() };
   } catch {
-    /* 지역 필터 없이도 전국 목록은 동작 */
+    regionData = { sido: DEFAULT_SIDO_LIST.slice() };
+  }
+  fillSidoSelect(sidoSelect, { includeAll: true, allLabel: "전국" });
+  fillSidoSelect(document.getElementById("sidoFilterDomestic"), { includeAll: true, allLabel: "전국" });
+  fillSidoSelect(document.getElementById("sidoFilterForeign"), { includeAll: true, allLabel: "전국" });
+  fillSidoSelect(document.getElementById("writeSido"), { includeAll: false, placeholder: "선택" });
+}
+
+function sidoOptions() {
+  return regionData?.sido?.length ? regionData.sido : DEFAULT_SIDO_LIST;
+}
+
+function fillSidoSelect(selectEl, { includeAll = false, allLabel = "전국", placeholder = "선택", selected = "" } = {}) {
+  if (!selectEl) return;
+  const prev = selected || selectEl.value;
+  const opts = [];
+  if (includeAll) {
+    opts.push(`<option value="">${escapeHtml(allLabel)}</option>`);
+  } else {
+    opts.push(`<option value="">${escapeHtml(placeholder)}</option>`);
+  }
+  for (const s of sidoOptions()) {
+    opts.push(`<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`);
+  }
+  selectEl.innerHTML = opts.join("");
+  if (prev && [...selectEl.options].some((o) => o.value === prev)) {
+    selectEl.value = prev;
+  }
+}
+
+function applyGemSearchFilter() {
+  const q = (document.getElementById("gemSearch")?.value || "").trim().toLowerCase();
+  if (!q) {
+    currentGems = aiGemsPool.slice();
+    return;
+  }
+  currentGems = aiGemsPool.filter((g) => {
+    const name = String(g.resNm || "").toLowerCase();
+    const nameEn = String(g.resNmEn || "").toLowerCase();
+    return name.includes(q) || nameEn.includes(q);
+  });
+}
+
+function runGemSearch() {
+  applyGemSearchFilter();
+  renderGems(currentGems);
+  if (!currentGems.length) {
+    resultsEl.innerHTML = "";
+    const li = document.createElement("li");
+    li.className = "empty-state";
+    li.textContent = "검색 결과가 없습니다.";
+    resultsEl.appendChild(li);
   }
 }
 
@@ -947,9 +1020,11 @@ function threadCardHtml(p, { showCategory = false } = {}) {
   const locationTitle = postField(p, "locationTitle");
   const address = postField(p, "address");
   const content = postField(p, "content");
-  const place = locationTitle
+    const place = locationTitle
     ? `<span class="thread-place">${escapeHtml(locationTitle)}${address ? ` · ${escapeHtml(address)}` : ""}</span>`
-    : "";
+    : address
+      ? `<span class="thread-place">${escapeHtml(address)}</span>`
+      : "";
   const media = p.imageUrl
     ? `<div class="thread-media"><img src="${escapeHtml(p.imageUrl)}" alt="" loading="lazy" /></div>`
     : "";
@@ -1003,8 +1078,92 @@ function renderBoardList(listEl, posts, opts = {}) {
     listEl.innerHTML = `<li class="empty-state">${opts.emptyText || "아직 게시글이 없습니다. 글쓰기로 첫 글을 남겨 보세요."}</li>`;
     return;
   }
-  listEl.innerHTML = posts.map((p) => threadCardHtml(p, opts)).join("");
+
+  const sortKey = opts.sortKey || "newest";
+  const sorted = sortBoardPosts(posts, sortKey);
+
+  // 마이 탭·추천/댓글순은 전체 순서가 보이도록 평탄 목록
+  if (opts.flat || opts.showCategory || sortKey === "likes" || sortKey === "comments") {
+    listEl.innerHTML = sorted.map((p) => threadCardHtml(p, opts)).join("");
+    bindThreadFeed(listEl);
+    return;
+  }
+
+  // 최신/오래된순: 도·시 그룹 유지, 그룹·글 모두 정렬
+  const groups = groupPostsByAddress(sorted);
+  const groupEntries = [...groups.entries()].map(([addr, items]) => [
+    addr,
+    sortBoardPosts(items, sortKey),
+  ]);
+  groupEntries.sort((a, b) => {
+    const ta = postTimeMs(a[1][0] || {});
+    const tb = postTimeMs(b[1][0] || {});
+    return sortKey === "oldest" ? ta - tb : tb - ta;
+  });
+
+  const parts = [];
+  for (const [addr, items] of groupEntries) {
+    parts.push(`
+      <li class="addr-group">
+        <h3 class="addr-group-title">${escapeHtml(addr)}</h3>
+        <ul class="addr-group-list">
+          ${items.map((p) => threadCardHtml(p, opts)).join("")}
+        </ul>
+      </li>`);
+  }
+  listEl.innerHTML = parts.join("");
   bindThreadFeed(listEl);
+}
+
+function boardFilterEls(tabId) {
+  const isForeign = tabId === "foreign";
+  return {
+    sidoSelect: document.getElementById(isForeign ? "sidoFilterForeign" : "sidoFilterDomestic"),
+    searchInput: document.getElementById(isForeign ? "boardSearchForeign" : "boardSearchDomestic"),
+    sortSelect: document.getElementById(isForeign ? "boardSortForeign" : "boardSortDomestic"),
+  };
+}
+
+function postTimeMs(p) {
+  const t = parseServerDate(p.regDate, p.regAt);
+  return Number.isNaN(t) ? 0 : t;
+}
+
+function sortBoardPosts(posts, sortKey) {
+  const list = (posts || []).slice();
+  switch (sortKey) {
+    case "oldest":
+      list.sort((a, b) => postTimeMs(a) - postTimeMs(b) || (a.postId || 0) - (b.postId || 0));
+      break;
+    case "likes":
+      list.sort(
+        (a, b) =>
+          (Number(b.recommendCount) || 0) - (Number(a.recommendCount) || 0) ||
+          postTimeMs(b) - postTimeMs(a)
+      );
+      break;
+    case "comments":
+      list.sort(
+        (a, b) =>
+          (Number(b.replyCount) || 0) - (Number(a.replyCount) || 0) ||
+          postTimeMs(b) - postTimeMs(a)
+      );
+      break;
+    case "newest":
+    default:
+      list.sort((a, b) => postTimeMs(b) - postTimeMs(a) || (b.postId || 0) - (a.postId || 0));
+  }
+  return list;
+}
+
+function groupPostsByAddress(posts) {
+  const groups = new Map();
+  for (const p of posts) {
+    const key = (p.address || "").trim() || "(지역 미지정)";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(p);
+  }
+  return groups;
 }
 
 async function toggleRecommendFromFeed(postId, btn) {
@@ -1034,23 +1193,79 @@ async function toggleRecommendFromFeed(postId, btn) {
   }
 }
 
+function postMatchesSido(post, sido) {
+  if (!sido) return true;
+  const addr = String(post.address || "").trim();
+  if (!addr) return false;
+  if (addr === sido) return true;
+  if (addr.startsWith(sido)) return true;
+  // 예전 자유입력 주소: "제주특별자치도 제주시 …" / "충북 …" 등
+  if (addr.includes(sido)) return true;
+  const aliases = SIDO_ALIASES[sido];
+  if (aliases) {
+    return aliases.some((a) => addr === a || addr.startsWith(a) || addr.includes(a));
+  }
+  return false;
+}
+
+function postMatchesPlaceName(post, q) {
+  if (!q) return true;
+  const needle = q.trim().toLowerCase();
+  const title = String(post.locationTitle || "").toLowerCase();
+  const titleEn = String(post._en?.locationTitle || "").toLowerCase();
+  return title.includes(needle) || titleEn.includes(needle);
+}
+
+function filterBoardPosts(posts, sido, q) {
+  return (posts || []).filter((p) => postMatchesSido(p, sido) && postMatchesPlaceName(p, q));
+}
+
+/** 시·도 표기 차이·옛 주소 호환 */
+const SIDO_ALIASES = {
+  강원특별자치도: ["강원도", "강원"],
+  전북특별자치도: ["전라북도", "전북"],
+  제주특별자치도: ["제주도", "제주"],
+  세종특별자치시: ["세종시", "세종"],
+  서울특별시: ["서울"],
+  부산광역시: ["부산"],
+  대구광역시: ["대구"],
+  인천광역시: ["인천"],
+  광주광역시: ["광주"],
+  대전광역시: ["대전"],
+  울산광역시: ["울산"],
+  경기도: ["경기"],
+  충청북도: ["충북"],
+  충청남도: ["충남"],
+  전라남도: ["전남"],
+  경상북도: ["경북"],
+  경상남도: ["경남"],
+};
+
 async function loadBoardPosts(tabId = activeTab) {
   const category = boardCategoryForTab(tabId);
   const statusId = category === "FOREIGN" ? "boardStatusForeign" : "boardStatusDomestic";
   const listId = category === "FOREIGN" ? "boardListForeign" : "boardListDomestic";
   const statusElBoard = document.getElementById(statusId);
   const listEl = document.getElementById(listId);
+  const { sidoSelect: boardSido, searchInput, sortSelect } = boardFilterEls(tabId);
 
   showStatus(statusElBoard, "피드를 불러오는 중…", "info");
   const qs = new URLSearchParams({
     memberId: currentMemberId(),
     category,
   });
+  const sido = boardSido?.value?.trim() || "";
+  const q = searchInput?.value?.trim() || "";
+  const sortKey = sortSelect?.value || "newest";
+  if (sido) qs.set("sido", sido);
+  if (q) qs.set("q", q);
+
   try {
     const res = await fetch(`/api/posts?${qs}`);
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "게시글 조회 실패");
-    boardPosts = data.posts || [];
+    // 서버 필터 + 클라이언트 필터(구버전 서버/옛 주소 호환)
+    boardPosts = filterBoardPosts(data.posts || [], sido, q);
     if (uiLang === "en" && boardPosts.length) {
       showStatus(statusElBoard, t("translating"), "info");
       try {
@@ -1060,7 +1275,11 @@ async function loadBoardPosts(tabId = activeTab) {
       }
     }
     hideStatus(statusElBoard);
-    renderBoardList(listEl, boardPosts);
+    const emptyText =
+      q || sido
+        ? "해당 장소·지역의 게시글이 없습니다."
+        : undefined;
+    renderBoardList(listEl, boardPosts, { emptyText, sortKey });
   } catch (e) {
     showStatus(statusElBoard, e.message || "오류", "error");
   }
@@ -1244,6 +1463,7 @@ function resetWriteForm() {
   writeError.hidden = true;
   if (writeTitle) writeTitle.textContent = "글쓰기";
   if (writeSubmit) writeSubmit.textContent = "등록";
+  fillSidoSelect(document.getElementById("writeSido"), { includeAll: false, placeholder: "선택" });
 }
 
 function openWriteForEdit(post) {
@@ -1254,7 +1474,9 @@ function openWriteForEdit(post) {
   if (writeSubmit) writeSubmit.textContent = "수정 저장";
   document.getElementById("writeCategory").value = post.category === "FOREIGN" ? "FOREIGN" : "DOMESTIC";
   document.getElementById("writeLocation").value = post.locationTitle || "";
-  document.getElementById("writeAddress").value = post.address || "";
+  const writeSido = document.getElementById("writeSido");
+  fillSidoSelect(writeSido, { includeAll: false, placeholder: "선택", selected: post.address || "" });
+  if (writeSido && post.address) writeSido.value = post.address;
   document.getElementById("writeContent").value = post.content || "";
   if (existingImageUrl) {
     writeImagePreview.hidden = false;
@@ -1326,7 +1548,50 @@ sortSelect.addEventListener("change", () => {
 });
 
 sidoSelect.addEventListener("change", () => {
+  const gemSearch = document.getElementById("gemSearch");
+  if (gemSearch) gemSearch.value = "";
   loadHiddenGems();
+});
+
+function wireBoardFilters(tabId) {
+  const { sidoSelect: boardSido, searchInput, sortSelect } = boardFilterEls(tabId);
+  const btn = document.getElementById(
+    tabId === "foreign" ? "boardSearchBtnForeign" : "boardSearchBtnDomestic"
+  );
+  boardSido?.addEventListener("change", () => loadBoardPosts(tabId));
+  sortSelect?.addEventListener("change", () => {
+    if (!boardPosts.length) {
+      loadBoardPosts(tabId);
+      return;
+    }
+    const listId = tabId === "foreign" ? "boardListForeign" : "boardListDomestic";
+    const listEl = document.getElementById(listId);
+    const sido = boardSido?.value?.trim() || "";
+    const q = searchInput?.value?.trim() || "";
+    renderBoardList(listEl, boardPosts, {
+      sortKey: sortSelect.value || "newest",
+      emptyText: q || sido ? "해당 장소·지역의 게시글이 없습니다." : undefined,
+    });
+  });
+  btn?.addEventListener("click", () => loadBoardPosts(tabId));
+  searchInput?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      loadBoardPosts(tabId);
+    }
+  });
+}
+wireBoardFilters("domestic");
+wireBoardFilters("foreign");
+
+const gemSearchInput = document.getElementById("gemSearch");
+const gemSearchBtn = document.getElementById("gemSearchBtn");
+gemSearchBtn?.addEventListener("click", () => runGemSearch());
+gemSearchInput?.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    runGemSearch();
+  }
 });
 
 authOpenBtn.addEventListener("click", () => openAuthDialog("login"));
@@ -1413,6 +1678,18 @@ writeForm.addEventListener("submit", async (e) => {
   writeError.hidden = true;
   const category = document.getElementById("writeCategory")?.value || "DOMESTIC";
   const content = document.getElementById("writeContent").value.trim();
+  const locationTitle = document.getElementById("writeLocation").value.trim();
+  const address = document.getElementById("writeSido")?.value?.trim() || "";
+  if (!locationTitle) {
+    writeError.hidden = false;
+    writeError.textContent = "장소명을 입력하세요.";
+    return;
+  }
+  if (!address) {
+    writeError.hidden = false;
+    writeError.textContent = "도/시를 선택하세요.";
+    return;
+  }
   if (!content) {
     writeError.hidden = false;
     writeError.textContent = "내용을 입력하세요.";
@@ -1424,8 +1701,8 @@ writeForm.addEventListener("submit", async (e) => {
   try {
     const payload = {
       memberId: currentMemberId(),
-      locationTitle: document.getElementById("writeLocation").value.trim(),
-      address: document.getElementById("writeAddress").value.trim(),
+      locationTitle,
+      address,
       content,
       category,
     };

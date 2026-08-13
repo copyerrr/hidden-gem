@@ -102,7 +102,6 @@ public class HiddenGemServer {
             new java.util.concurrent.atomic.AtomicBoolean(false);
     /** 한 번에 전체 1260건을 받으면 Read timed out 나므로 페이지 단위로 받음 */
     private static final int API_PAGE_SIZE = 100;
-    private static final Path CACHE_DIR = Path.of("out");
 
     public static void main(String[] args) throws Exception {
         if (args.length > 0 && "traffic".equalsIgnoreCase(args[0])) {
@@ -422,15 +421,10 @@ public class HiddenGemServer {
         if (cached != null) {
             return cached;
         }
-        List<Attraction> fromDisk = readYmDiskCache(ym);
-        if (fromDisk != null && !fromDisk.isEmpty()) {
-            System.out.println("캐시 사용: " + ymDiskCachePath(ym) + " (" + fromDisk.size() + "건)");
-            YM_DATA_CACHE.put(ym, fromDisk);
-            return fromDisk;
-        }
+        System.out.println("방문 통계 API 로딩 중… (ym=" + ym + ")");
         List<Attraction> list = fetchAllFromApi(ym);
         YM_DATA_CACHE.put(ym, list);
-        writeYmDiskCache(ym, list);
+        System.out.println("방문 통계 로딩 완료: " + list.size() + "건 (RAM만 보관, 서버 종료 시 삭제)");
         return list;
     }
 
@@ -484,66 +478,6 @@ public class HiddenGemServer {
             }
         }
         return all;
-    }
-
-    private static Path ymDiskCachePath(String ym) {
-        return CACHE_DIR.resolve("ym-" + ym + ".tsv");
-    }
-
-    private static List<Attraction> readYmDiskCache(String ym) {
-        Path path = ymDiskCachePath(ym);
-        if (!Files.isRegularFile(path)) {
-            return null;
-        }
-        try {
-            List<String> lines = Files.readAllLines(path, StandardCharsets.UTF_8);
-            List<Attraction> list = new ArrayList<>();
-            for (String line : lines) {
-                if (line.isBlank() || line.startsWith("#")) {
-                    continue;
-                }
-                String[] p = line.split("\t", -1);
-                if (p.length < 7) {
-                    continue;
-                }
-                list.add(new Attraction(
-                        p[0], p[1], p[2], p[3], p[4],
-                        parseDouble(p[5]), parseDouble(p[6])));
-            }
-            return list;
-        } catch (Exception e) {
-            System.err.println("캐시 읽기 실패(무시): " + e.getMessage());
-            return null;
-        }
-    }
-
-    private static void writeYmDiskCache(String ym, List<Attraction> list) {
-        try {
-            Files.createDirectories(CACHE_DIR);
-            Path path = ymDiskCachePath(ym);
-            StringBuilder sb = new StringBuilder();
-            sb.append("# ym=").append(ym).append(" count=").append(list.size()).append('\n');
-            for (Attraction a : list) {
-                sb.append(escTab(a.resNm)).append('\t')
-                        .append(escTab(a.sido)).append('\t')
-                        .append(escTab(a.gungu)).append('\t')
-                        .append(escTab(a.addrCd)).append('\t')
-                        .append(escTab(a.ym)).append('\t')
-                        .append(a.domestic).append('\t')
-                        .append(a.foreign).append('\n');
-            }
-            Files.writeString(path, sb.toString(), StandardCharsets.UTF_8);
-            System.out.println("캐시 저장: " + path + " (" + list.size() + "건)");
-        } catch (Exception e) {
-            System.err.println("캐시 저장 실패(무시): " + e.getMessage());
-        }
-    }
-
-    private static String escTab(String s) {
-        if (s == null) {
-            return "";
-        }
-        return s.replace('\t', ' ').replace('\n', ' ').replace('\r', ' ');
     }
 
     private static List<Attraction> parseAttractions(Document doc) {
@@ -1559,7 +1493,7 @@ public class HiddenGemServer {
         List<Attraction> all = loadYmData(ym);
         List<HiddenGem> gems = buildGemList(all, n);
         if (gems.isEmpty()) {
-            System.out.println("비교할 장소가 없습니다. out/ym-" + ym + ".tsv 를 확인하세요.");
+            System.out.println("비교할 장소가 없습니다. 방문 통계 API 응답을 확인하세요.");
             return;
         }
         System.out.println("샘플:");

@@ -309,7 +309,15 @@ public final class BoardApi {
             posts = BoardDb.listRecommendedPosts(viewer, likedBy);
         } else {
             String category = qmap.getOrDefault("category", "DOMESTIC");
-            posts = BoardDb.listPosts(viewer, category);
+            String sido = qmap.getOrDefault("sido", "").trim();
+            if (sido.isEmpty()) {
+                sido = qmap.getOrDefault("address", "").trim();
+            }
+            String search = qmap.getOrDefault("q", "").trim();
+            if (search.isEmpty()) {
+                search = qmap.getOrDefault("search", "").trim();
+            }
+            posts = BoardDb.listPosts(viewer, category, sido, search);
         }
         StringBuilder sb = new StringBuilder("{\"posts\":[");
         for (int i = 0; i < posts.size(); i++) {

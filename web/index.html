@@ -33,10 +33,15 @@
     <section id="panel-ai" class="panel active" role="tabpanel">
       <div class="panel-toolbar">
         <div class="region-wrap">
-          <label for="sidoSelect">지역</label>
+          <label for="sidoSelect">도/시</label>
           <select id="sidoSelect">
             <option value="">전국</option>
           </select>
+        </div>
+        <div class="board-search-wrap ai-search-wrap">
+          <label for="gemSearch" class="sr-only">장소명 검색</label>
+          <input id="gemSearch" type="search" placeholder="장소명 검색" autocomplete="off">
+          <button type="button" id="gemSearchBtn" class="btn-ghost board-search-btn">검색</button>
         </div>
         <div class="sort-wrap">
           <label for="sort">정렬</label>
@@ -54,12 +59,56 @@
 
     <!-- 내국인 추천 = DB Post 피드 -->
     <section id="panel-domestic" class="panel" role="tabpanel" hidden>
+      <div class="panel-toolbar board-toolbar">
+        <div class="region-wrap">
+          <label for="sidoFilterDomestic">도/시</label>
+          <select id="sidoFilterDomestic">
+            <option value="">전국</option>
+          </select>
+        </div>
+        <div class="sort-wrap">
+          <label for="boardSortDomestic">정렬</label>
+          <select id="boardSortDomestic">
+            <option value="newest">최신순</option>
+            <option value="oldest">오래된순</option>
+            <option value="likes">추천순</option>
+            <option value="comments">댓글순</option>
+          </select>
+        </div>
+        <div class="board-search-wrap">
+          <label for="boardSearchDomestic" class="sr-only">장소명 검색</label>
+          <input id="boardSearchDomestic" type="search" placeholder="장소명 검색" autocomplete="off">
+          <button type="button" id="boardSearchBtnDomestic" class="btn-ghost board-search-btn">검색</button>
+        </div>
+      </div>
       <div id="boardStatusDomestic" class="status" hidden></div>
       <ul id="boardListDomestic" class="thread-feed"></ul>
     </section>
 
     <!-- 외국인 추천 -->
     <section id="panel-foreign" class="panel" role="tabpanel" hidden>
+      <div class="panel-toolbar board-toolbar">
+        <div class="region-wrap">
+          <label for="sidoFilterForeign">도/시</label>
+          <select id="sidoFilterForeign">
+            <option value="">전국</option>
+          </select>
+        </div>
+        <div class="sort-wrap">
+          <label for="boardSortForeign">정렬</label>
+          <select id="boardSortForeign">
+            <option value="newest">최신순</option>
+            <option value="oldest">오래된순</option>
+            <option value="likes">추천순</option>
+            <option value="comments">댓글순</option>
+          </select>
+        </div>
+        <div class="board-search-wrap">
+          <label for="boardSearchForeign" class="sr-only">장소명 검색</label>
+          <input id="boardSearchForeign" type="search" placeholder="장소명 검색" autocomplete="off">
+          <button type="button" id="boardSearchBtnForeign" class="btn-ghost board-search-btn">검색</button>
+        </div>
+      </div>
       <div id="boardStatusForeign" class="status" hidden></div>
       <ul id="boardListForeign" class="thread-feed"></ul>
     </section>
@@ -113,8 +162,12 @@
           <option value="FOREIGN">외국인 추천</option>
         </select>
       </label>
-      <label>장소명<input id="writeLocation" name="locationTitle" placeholder="예: 부산시립미술관"></label>
-      <label>주소<input id="writeAddress" name="address" placeholder="선택"></label>
+      <label>장소명<input id="writeLocation" name="locationTitle" placeholder="예: 부산시립미술관" required></label>
+      <label>도/시
+        <select id="writeSido" name="address" required>
+          <option value="">선택</option>
+        </select>
+      </label>
       <label>사진
         <input id="writeImage" name="image" type="file" accept="image/*">
       </label>
