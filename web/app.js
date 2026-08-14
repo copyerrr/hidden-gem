@@ -268,7 +268,11 @@ function loadStoredUser() {
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (parsed && parsed.memberId) {
-      return { memberId: String(parsed.memberId), nickname: String(parsed.nickname || parsed.memberId) };
+      return {
+        memberId: String(parsed.memberId),
+        nickname: String(parsed.nickname || parsed.memberId),
+        profileImage: String(parsed.profileImage || ""),
+      };
     }
   } catch {
     /* ignore */
@@ -308,17 +312,46 @@ function renderMyHeader() {
   const avatar = document.getElementById("myAvatar");
   const nameEl = document.getElementById("myName");
   const subEl = document.getElementById("mySub");
+  const resetBtn = document.getElementById("myAvatarReset");
   if (!avatar || !nameEl || !subEl) return;
   if (currentUser) {
     const nick = currentUser.nickname || currentUser.memberId;
-    avatar.textContent = String(nick).charAt(0);
+    fillAvatar(avatar, currentUser.profileImage, nick);
+    avatar.classList.add("editable");
     nameEl.textContent = nick;
     subEl.textContent = `@${currentUser.memberId}`;
+    if (resetBtn) resetBtn.hidden = !currentUser.profileImage;
   } else {
-    avatar.textContent = "?";
+    fillAvatar(avatar, "", "?");
+    avatar.classList.remove("editable");
     nameEl.textContent = "게스트";
     subEl.textContent = "로그인하면 내 글·추천 목록을 볼 수 있어요";
+    if (resetBtn) resetBtn.hidden = true;
   }
+}
+
+function fillAvatar(el, url, name) {
+  const letter = String(name || "?").charAt(0);
+  if (url) {
+    el.innerHTML = `<img src="${escapeHtml(url)}" alt="">`;
+  } else {
+    el.textContent = letter;
+  }
+}
+
+async function saveProfileImage(url) {
+  const res = await fetch("/api/profile", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ memberId: currentUser.memberId, profileImage: url || "" }),
+  });
+  const data = await readJsonResponse(res);
+  if (!res.ok) throw new Error(data.error || "프로필 사진 저장 실패");
+  saveUser({
+    memberId: data.memberId,
+    nickname: data.nickname || currentUser.nickname,
+    profileImage: url ? data.profileImage || url : "",
+  });
 }
 
 function requireLogin(message = "로그인이 필요합니다.") {
@@ -854,7 +887,9 @@ function renderPlaceDetail(gem, data) {
         <p class="nearby-empty">${escapeHtml(
           (uiLang === "en" && data.messageEn) || data.message || (uiLang === "en" ? "Details not found." : "상세 정보를 찾지 못했습니다.")
         )}</p>
+        ${transitSectionHtml(data)}
       </div>`;
+    bindTransitSection(gem, data);
     return;
   }
 
@@ -927,6 +962,8 @@ function renderPlaceDetail(gem, data) {
         }
       </section>
 
+      ${transitSectionHtml(data)}
+
       <section>
         <h3 class="place-section-title">${uiLang === "en" ? "Nearby food" : "근처 맛집"}</h3>
         ${nearbyCardsHtml(data.restaurants)}
@@ -953,6 +990,579 @@ function renderPlaceDetail(gem, data) {
     });
   }
   bindNearbyCards();
+  bindTransitSection(gem, data);
+}
+
+function transitSectionHtml() {
+  return `
+      <section class="place-transit-section">
+        <h3 class="place-section-title">${uiLang === "en" ? "Directions" : "길찾기"}</h3>
+        <div class="place-transit-actions">
+          <button type="button" class="btn-primary" id="transitGpsBtn">${
+            uiLang === "en" ? "From my location" : "내 위치에서"
+          }</button>
+        </div>
+        <p id="transitStatus" class="place-transit-status" hidden></p>
+        <div id="transitResult" class="transit-result" hidden></div>
+      </section>`;
+}
+
+let publicConfigPromise = null;
+let kakaoMapsLoadPromise = null;
+
+async function fetchPublicConfig() {
+  if (!publicConfigPromise) {
+    publicConfigPromise = (async () => {
+      try {
+        const res = await fetch("/api/config");
+        if (res.ok) {
+          const data = await res.json();
+          if (data.odsayApiKey || data.kakaoJsKey) return data;
+        }
+      } catch {
+        /* 예전 서버는 /api/config 없음 → 정적 파일로 폴백 */
+      }
+      const res2 = await fetch("/config.json");
+      if (!res2.ok) throw new Error("config missing");
+      return res2.json();
+    })().catch((err) => {
+      console.warn(err);
+      publicConfigPromise = null;
+      return { kakaoJsKey: "", odsayApiKey: "", configMissing: true };
+    });
+  }
+  return publicConfigPromise;
+}
+
+function loadKakaoMapsSdk(appKey) {
+  if (!appKey) {
+    return Promise.reject(new Error("카카오맵 JS 키가 없습니다."));
+  }
+  if (window.kakao?.maps) {
+    return new Promise((resolve) => window.kakao.maps.load(() => resolve()));
+  }
+  if (kakaoMapsLoadPromise) return kakaoMapsLoadPromise;
+  kakaoMapsLoadPromise = new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = `https://dapi.kakao.com/v2/maps/sdk.js?appkey=${encodeURIComponent(appKey)}&libraries=services&autoload=false`;
+    script.async = true;
+    script.onload = () => {
+      if (!window.kakao?.maps) {
+        reject(new Error("카카오맵 SDK 로드 실패"));
+        return;
+      }
+      window.kakao.maps.load(() => resolve());
+    };
+    script.onerror = () => reject(new Error("카카오맵 스크립트를 불러오지 못했습니다."));
+    document.head.appendChild(script);
+  });
+  return kakaoMapsLoadPromise;
+}
+
+function haversineKm(lat1, lng1, lat2, lng2) {
+  const toRad = (d) => (d * Math.PI) / 180;
+  const R = 6371;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function getCurrentPositionGps() {
+  return new Promise((resolve, reject) => {
+    if (!navigator.geolocation) {
+      reject(new Error(uiLang === "en" ? "Geolocation is not supported." : "이 브라우저는 위치 정보를 지원하지 않습니다."));
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (pos) =>
+        resolve({
+          lat: pos.coords.latitude,
+          lng: pos.coords.longitude,
+          accuracy: pos.coords.accuracy,
+        }),
+      (err) => {
+        let msg = uiLang === "en" ? "Could not get location." : "위치를 가져오지 못했습니다.";
+        if (err?.code === 1) msg = uiLang === "en" ? "Location permission denied." : "위치 권한이 거부되었습니다.";
+        else if (err?.code === 2) msg = uiLang === "en" ? "Location unavailable." : "위치를 확인할 수 없습니다.";
+        else if (err?.code === 3) msg = uiLang === "en" ? "Location request timed out." : "위치 요청 시간이 초과되었습니다.";
+        reject(new Error(msg));
+      },
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 }
+    );
+  });
+}
+
+function geocodePlaceWithKakao(query) {
+  return new Promise((resolve, reject) => {
+    if (!window.kakao?.maps?.services) {
+      reject(new Error("geocoder unavailable"));
+      return;
+    }
+    const geocoder = new kakao.maps.services.Geocoder();
+    geocoder.addressSearch(query, (result, status) => {
+      if (status === kakao.maps.services.Status.OK && result[0]) {
+        resolve({ lat: Number(result[0].y), lng: Number(result[0].x) });
+        return;
+      }
+      const places = new kakao.maps.services.Places();
+      places.keywordSearch(query, (res2, st2) => {
+        if (st2 === kakao.maps.services.Status.OK && res2[0]) {
+          resolve({ lat: Number(res2[0].y), lng: Number(res2[0].x) });
+        } else {
+          reject(new Error(uiLang === "en" ? "Could not find destination." : "도착지 좌표를 찾지 못했습니다."));
+        }
+      });
+    });
+  });
+}
+
+async function resolveDestCoords(gem, data) {
+  const lng = Number(data.mapx);
+  const lat = Number(data.mapy);
+  if (Number.isFinite(lng) && Number.isFinite(lat) && lng !== 0 && lat !== 0) {
+    return { lat, lng };
+  }
+  const cfg = await fetchPublicConfig();
+  await loadKakaoMapsSdk(cfg.kakaoJsKey || "");
+  const q = [gem.sido, gem.gungu, gem.resNm || data.title || data.addr]
+    .filter(Boolean)
+    .join(" ");
+  if (!q.trim()) {
+    throw new Error(uiLang === "en" ? "Destination coordinates unavailable." : "도착지 좌표가 없습니다.");
+  }
+  return geocodePlaceWithKakao(q.trim());
+}
+
+function bindTransitSection(gem, data) {
+  const btn = document.getElementById("transitGpsBtn");
+  const statusEl = document.getElementById("transitStatus");
+  if (!btn || !statusEl) return;
+
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    statusEl.hidden = false;
+    statusEl.textContent = uiLang === "en" ? "Finding route…" : "경로 찾는 중…";
+    try {
+      const origin = await getCurrentPositionGps();
+      const dest = await resolveDestCoords(gem, data);
+      const cfg = await fetchPublicConfig();
+      if (cfg.odsayApiKey) {
+        const odsay = await searchOdsayTransit(origin, dest, cfg.odsayApiKey);
+        renderOdsayTransit(odsay);
+      } else if (cfg.configMissing) {
+        statusEl.textContent = "서버를 재시작한 뒤 다시 시도해 주세요.";
+      } else {
+        statusEl.textContent = uiLang === "en" ? "No route." : "경로를 찾지 못했습니다.";
+      }
+    } catch (err) {
+      statusEl.hidden = false;
+      statusEl.textContent = err.message || (uiLang === "en" ? "Failed." : "실패했습니다.");
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}
+
+function jsonp(url) {
+  return new Promise((resolve, reject) => {
+    const cb = `__odsay_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error("ODsay 응답 시간 초과"));
+    }, 12000);
+    function cleanup() {
+      clearTimeout(timer);
+      delete window[cb];
+      script.remove();
+    }
+    window[cb] = (data) => {
+      cleanup();
+      resolve(data);
+    };
+    const script = document.createElement("script");
+    script.src = url + (url.includes("?") ? "&" : "?") + "callback=" + cb;
+    script.onerror = () => {
+      cleanup();
+      reject(new Error("ODsay 호출 실패"));
+    };
+    document.head.appendChild(script);
+  });
+}
+
+async function odsayCall(origin, dest, apiKey, extra = {}) {
+  const params = new URLSearchParams({
+    apiKey,
+    SX: String(origin.lng),
+    SY: String(origin.lat),
+    EX: String(dest.lng),
+    EY: String(dest.lat),
+    lang: uiLang === "en" ? "1" : "0",
+    SearchPathType: "0",
+  });
+  for (const [k, v] of Object.entries(extra)) {
+    if (v != null && v !== "") params.set(k, String(v));
+  }
+  const url = `https://api.odsay.com/v1/api/searchPubTransPathT?${params}`;
+  try {
+    const res = await fetch(url);
+    if (res.ok) return await res.json();
+  } catch {
+    /* CORS 시 JSONP */
+  }
+  return jsonp(url);
+}
+
+function odsayPoint(sp, which) {
+  if (!sp) return null;
+  const lng = Number(which === "start" ? sp.startX : sp.endX);
+  const lat = Number(which === "start" ? sp.startY : sp.endY);
+  if (!Number.isFinite(lng) || !Number.isFinite(lat) || lng === 0 || lat === 0) return null;
+  return {
+    lng,
+    lat,
+    name: which === "start" ? sp.startName : sp.endName,
+  };
+}
+
+function odsayIsLongHaul(sp) {
+  const t = Number(sp?.trafficType);
+  return t === 4 || t === 5 || t === 6 || t === 7;
+}
+
+async function searchOdsayTransit(origin, dest, apiKey) {
+  const data = await odsayCall(origin, dest, apiKey);
+  const paths = data?.result?.path;
+  if (!paths?.length) return data;
+
+  const shown = paths.slice(0, 8);
+  const cityCache = new Map();
+  const cityLeg = async (from, to) => {
+    const key = `${from.lng.toFixed(4)},${from.lat.toFixed(4)}>${to.lng.toFixed(4)},${to.lat.toFixed(4)}`;
+    if (!cityCache.has(key)) {
+      cityCache.set(
+        key,
+        odsayCall(from, to, apiKey, { SearchType: "0" }).catch(() => null)
+      );
+    }
+    const res = await cityCache.get(key);
+    return res?.result?.path?.[0] || null;
+  };
+
+  await Promise.all(
+    shown.map(async (path) => {
+      const rides = (path.subPath || []).filter((sp) => Number(sp.trafficType) !== 3);
+      const hasLong = rides.some(odsayIsLongHaul);
+      if (!hasLong) return;
+      const first = rides[0];
+      const last = rides[rides.length - 1];
+      const board = odsayPoint(first, "start");
+      const alight = odsayPoint(last, "end");
+      const jobs = [];
+      if (board && haversineKm(origin.lat, origin.lng, board.lat, board.lng) > 0.7) {
+        jobs.push(
+          cityLeg(origin, board).then((leg) => {
+            if (leg) {
+              path._firstMile = leg;
+              path._boardName = board.name;
+            } else {
+              path._incomplete = true;
+            }
+          })
+        );
+      }
+      if (alight && haversineKm(alight.lat, alight.lng, dest.lat, dest.lng) > 0.7) {
+        jobs.push(
+          cityLeg(alight, dest).then((leg) => {
+            if (leg) {
+              path._lastMile = leg;
+              path._alightName = alight.name;
+            } else {
+              path._incomplete = true;
+            }
+          })
+        );
+      }
+      await Promise.all(jobs);
+    })
+  );
+  data.result.path = shown.filter((p) => !p._incomplete);
+  return data;
+}
+
+function odsayBusTypeLabel(type) {
+  const n = Number(type);
+  const map = {
+    1: "일반",
+    2: "좌석",
+    3: "마을",
+    4: "직행좌석",
+    5: "공항",
+    6: "간선급행",
+    10: "외곽",
+    11: "간선",
+    12: "지선",
+    13: "순환",
+    14: "광역",
+    15: "급행",
+    20: "농어촌",
+    21: "제주",
+    22: "경기광역",
+    26: "급행간선",
+  };
+  return map[n] || "";
+}
+
+function odsayTrainName(sp) {
+  const code = Number(sp.trainType ?? sp.trafficSubType);
+  const map = {
+    1: "KTX",
+    2: "새마을",
+    3: "무궁화",
+    4: "누리로",
+    5: "통근열차",
+    6: "ITX",
+    7: "ITX-청춘",
+    8: "SRT",
+  };
+  return map[code] || "";
+}
+
+function odsayKind(sp) {
+  const t = Number(sp.trafficType);
+  if (t === 1) return { kind: uiLang === "en" ? "Subway" : "지하철", badge: "subway" };
+  if (t === 2) return { kind: uiLang === "en" ? "Bus" : "버스", badge: "bus" };
+  if (t === 3) return { kind: uiLang === "en" ? "Walk" : "도보", badge: "walk" };
+  if (t === 4) {
+    const train = odsayTrainName(sp);
+    return { kind: train || (uiLang === "en" ? "Train" : "열차"), badge: "train" };
+  }
+  if (t === 5) return { kind: uiLang === "en" ? "Express bus" : "고속버스", badge: "bus" };
+  if (t === 6) return { kind: uiLang === "en" ? "Intercity bus" : "시외버스", badge: "bus" };
+  if (t === 7) return { kind: uiLang === "en" ? "Flight" : "항공", badge: "train" };
+  return { kind: uiLang === "en" ? "Transit" : "이동", badge: "walk" };
+}
+
+function odsayRideTitle(sp) {
+  const t = Number(sp.trafficType);
+  const lanes = Array.isArray(sp.lane) ? sp.lane : sp.lane ? [sp.lane] : [];
+  const first = lanes[0] || {};
+  const no = String(first.busNo || first.busNoKor || "").trim();
+  const nm = String(first.name || "").trim();
+  if (t === 1) return uiLang === "en" ? "Subway" : "지하철";
+  if (t === 2) {
+    const kind = odsayBusTypeLabel(first.type);
+    return !kind || kind === "일반" ? (uiLang === "en" ? "Bus" : "시내버스") : kind;
+  }
+  if (t === 4) return odsayTrainName(sp) || (uiLang === "en" ? "Train" : "열차");
+  if (t === 5) return no ? `${uiLang === "en" ? "Express" : "고속버스"} ${no}` : uiLang === "en" ? "Express bus" : "고속버스";
+  if (t === 6) return no ? `${uiLang === "en" ? "Intercity" : "시외버스"} ${no}` : uiLang === "en" ? "Intercity bus" : "시외버스";
+  if (t === 7) return uiLang === "en" ? "Flight" : "항공";
+  return odsayKind(sp).kind;
+}
+
+function odsayPillText(sp) {
+  const t = Number(sp.trafficType);
+  const lanes = Array.isArray(sp.lane) ? sp.lane : sp.lane ? [sp.lane] : [];
+  const first = lanes[0] || {};
+  const no = String(first.busNo || first.busNoKor || "").trim();
+  if (no) return no;
+  const nm = String(first.name || "").trim();
+  if (t === 1 && nm) {
+    const line = nm.match(/(\d+)\s*호선/);
+    if (line) return line[1];
+    return nm.replace(/^수도권\s*/, "").replace(/호선$/, "") || nm;
+  }
+  if (t === 4) return odsayTrainName(sp) || "열차";
+  if (t === 5) return "고속";
+  if (t === 6) return "시외";
+  if (t === 7) return "항공";
+  return odsayKind(sp).kind;
+}
+
+function odsayPillColor(sp) {
+  const t = Number(sp.trafficType);
+  if (t === 2 || t === 5 || t === 6) return "#3b82f6";
+  if (t === 4 || t === 7) return "#db2777";
+  if (t !== 1) return "#6b7280";
+  const nm = String((Array.isArray(sp.lane) ? sp.lane[0] : sp.lane)?.name || "");
+  const colors = [
+    ["1호선", "#0052a4"],
+    ["2호선", "#00a84d"],
+    ["3호선", "#ef7c1c"],
+    ["4호선", "#00a5de"],
+    ["5호선", "#996cac"],
+    ["6호선", "#cd7c2f"],
+    ["7호선", "#747f00"],
+    ["8호선", "#e6186c"],
+    ["9호선", "#bdb092"],
+    ["신분당", "#d31145"],
+    ["경의", "#77c4a3"],
+    ["수인", "#f5a200"],
+    ["분당", "#f5a200"],
+    ["경춘", "#0c8e72"],
+    ["공항", "#0090d2"],
+    ["신림", "#6789ca"],
+    ["우이", "#b7c452"],
+  ];
+  const hit = colors.find(([k]) => nm.includes(k));
+  return hit ? hit[1] : "#16a34a";
+}
+
+function odsayMidStops(sp) {
+  const raw = sp.passStopList?.stations || (Array.isArray(sp.passStopList) ? sp.passStopList : []);
+  const names = raw.map((s) => s.stationName || s.stationNm || s.name).filter(Boolean);
+  if (names.length >= 3) return names.slice(1, -1);
+  return [];
+}
+
+function odsayAllSubPaths(path) {
+  return [
+    ...(path._firstMile?.subPath || []),
+    ...(path.subPath || []),
+    ...(path._lastMile?.subPath || []),
+  ];
+}
+
+function odsayPathTime(path) {
+  const legs = odsayAllSubPaths(path).reduce((s, sp) => s + (Number(sp.sectionTime) || 0), 0);
+  if (legs) return legs;
+  return (
+    (Number(path.info?.totalTime) || 0) +
+    (Number(path._firstMile?.info?.totalTime) || 0) +
+    (Number(path._lastMile?.info?.totalTime) || 0)
+  );
+}
+
+function odsayPathPay(path) {
+  return (
+    (Number(path.info?.payment) || 0) +
+    (Number(path._firstMile?.info?.payment) || 0) +
+    (Number(path._lastMile?.info?.payment) || 0)
+  );
+}
+
+function odsayPathHeadline(path) {
+  if (path._incomplete) return "";
+  const time = odsayPathTime(path);
+  const pay = odsayPathPay(path);
+  const parts = [];
+  if (time) parts.push(`${time}분`);
+  if (pay) parts.push(`${pay.toLocaleString("ko-KR")}원`);
+  return parts.join(" · ");
+}
+
+function odsayWalkHtml(sp) {
+  const min = Number(sp.sectionTime) || 0;
+  if (min <= 0) return "";
+  return `<li class="transit-walk">${uiLang === "en" ? "Walk" : "도보"} ${min}분</li>`;
+}
+
+function odsayRideHtml(sp) {
+  const min = Number(sp.sectionTime) || 0;
+  const from = sp.startName || "";
+  const to = sp.endName || "";
+  const mids = odsayMidStops(sp);
+  const color = odsayPillColor(sp);
+  const stopWord = Number(sp.trafficType) === 1
+    ? uiLang === "en" ? "stations" : "개 역"
+    : uiLang === "en" ? "stops" : "개 정류장";
+  const expandLabel = uiLang === "en"
+    ? `${mids.length} ${stopWord}`
+    : `${mids.length}${stopWord}`;
+  return `<li class="transit-card">
+    <div class="transit-card-head">
+      <span class="transit-num" style="background:${color}">${escapeHtml(odsayPillText(sp))}</span>
+      <span class="transit-mode">${escapeHtml(odsayRideTitle(sp))}</span>
+      ${min ? `<span class="transit-min">${min}분</span>` : ""}
+    </div>
+    <div class="transit-io">
+      <p class="transit-stop board">${escapeHtml(from || "—")}</p>
+      ${
+        mids.length
+          ? `<button type="button" class="transit-stop-toggle" aria-expanded="false" data-label="${escapeHtml(expandLabel)}">${expandLabel} ▾</button>
+      <ul class="transit-stop-list" hidden>${mids.map((n) => `<li>${escapeHtml(n)}</li>`).join("")}</ul>`
+          : ""
+      }
+      <p class="transit-stop alight">${escapeHtml(to || "—")}</p>
+    </div>
+  </li>`;
+}
+
+function odsayLegHtml(sp) {
+  return Number(sp.trafficType) === 3 ? odsayWalkHtml(sp) : odsayRideHtml(sp);
+}
+
+function odsayPathCard(path, idx, hidden) {
+  const legs = odsayAllSubPaths(path).map(odsayLegHtml).filter(Boolean).join("");
+  return `<article class="transit-path" data-idx="${idx}"${hidden ? " hidden" : ""}>
+    <ol class="transit-timeline">${legs}</ol>
+  </article>`;
+}
+
+function bindTransitToggles(listEl) {
+  if (listEl.dataset.transitBound) return;
+  listEl.dataset.transitBound = "1";
+  listEl.addEventListener("click", (e) => {
+    const alt = e.target.closest(".transit-alt");
+    if (alt && listEl.contains(alt)) {
+      const idx = alt.dataset.idx;
+      listEl.querySelectorAll(".transit-alt").forEach((b) => b.classList.toggle("active", b === alt));
+      listEl.querySelectorAll(".transit-path").forEach((p) => {
+        p.hidden = p.dataset.idx !== idx;
+      });
+      return;
+    }
+    const tog = e.target.closest(".transit-stop-toggle");
+    if (!tog || !listEl.contains(tog)) return;
+    const list = tog.nextElementSibling;
+    if (!list || !list.classList.contains("transit-stop-list")) return;
+    const open = list.hidden;
+    list.hidden = !open;
+    tog.setAttribute("aria-expanded", String(open));
+    const label = tog.dataset.label || "";
+    tog.textContent = open ? `${label} ▴` : `${label} ▾`;
+  });
+}
+
+function renderOdsayTransit(data) {
+  const statusEl = document.getElementById("transitStatus");
+  const listEl = document.getElementById("transitResult");
+  if (!statusEl) return;
+  const err = data?.error;
+  if (err) {
+    const first = Array.isArray(err) ? err[0] : err;
+    statusEl.hidden = false;
+    statusEl.textContent = first?.msg || first?.message || "경로를 찾지 못했습니다.";
+    return;
+  }
+  const paths = (data?.result?.path || []).filter((p) => !p._incomplete);
+  if (!paths.length) {
+    statusEl.hidden = false;
+    statusEl.textContent = uiLang === "en" ? "No route." : "경로를 찾지 못했습니다.";
+    return;
+  }
+  statusEl.hidden = true;
+  statusEl.textContent = "";
+  if (!listEl) return;
+  const shown = paths.slice(0, 3);
+  const alts =
+    shown.length > 1
+      ? `<div class="transit-alts">${shown
+          .map((p, i) => {
+            const label = odsayPathHeadline(p);
+            return `<button type="button" class="transit-alt${i === 0 ? " active" : ""}" data-idx="${i}">${label}</button>`;
+          })
+          .join("")}</div>`
+      : odsayPathHeadline(shown[0])
+        ? `<p class="transit-total">${odsayPathHeadline(shown[0])}</p>`
+        : "";
+  listEl.hidden = false;
+  listEl.innerHTML =
+    alts + shown.map((p, i) => odsayPathCard(p, i, i !== 0)).join("");
+  bindTransitToggles(listEl);
 }
 
 let myView = "posts"; // posts | liked
@@ -1031,10 +1641,13 @@ function threadCardHtml(p, { showCategory = false } = {}) {
   const cat = showCategory
     ? `<span class="thread-cat">${escapeHtml(categoryLabel(p.category))}</span>`
     : "";
+  const avatarInner = p.profileImage
+    ? `<img src="${escapeHtml(p.profileImage)}" alt="">`
+    : escapeHtml(letter);
   const on = p.recommended ? "on" : "";
   return `
     <li class="thread-item" data-post-id="${p.postId}">
-      <div class="thread-avatar" aria-hidden="true">${escapeHtml(letter)}</div>
+      <div class="thread-avatar" aria-hidden="true">${avatarInner}</div>
       <div class="thread-main">
         <div class="thread-head">
           <span class="thread-name">${escapeHtml(name)}</span>
@@ -1528,13 +2141,22 @@ function fileToCompressedDataUrl(file) {
   });
 }
 
+async function readJsonResponse(res) {
+  const text = await res.text();
+  try {
+    return text ? JSON.parse(text) : {};
+  } catch {
+    throw new Error("서버를 재시작한 뒤 다시 시도해 주세요.");
+  }
+}
+
 async function uploadImageDataUrl(dataUrl) {
   const res = await fetch("/api/upload", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ imageBase64: dataUrl, contentType: "image/jpeg" }),
   });
-  const data = await res.json();
+  const data = await readJsonResponse(res);
   if (!res.ok) throw new Error(data.error || "사진 업로드 실패");
   return data.url;
 }
@@ -1598,6 +2220,34 @@ authOpenBtn.addEventListener("click", () => openAuthDialog("login"));
 logoutBtn.addEventListener("click", () => {
   saveUser(null);
 });
+document.getElementById("myAvatar")?.addEventListener("click", () => {
+  if (!currentUser) {
+    openAuthDialog("login");
+    return;
+  }
+  document.getElementById("myAvatarInput")?.click();
+});
+document.getElementById("myAvatarInput")?.addEventListener("change", async (e) => {
+  const input = e.target;
+  const file = input.files?.[0];
+  input.value = "";
+  if (!file || !currentUser) return;
+  try {
+    const dataUrl = await fileToCompressedDataUrl(file);
+    const url = await uploadImageDataUrl(dataUrl);
+    await saveProfileImage(url);
+  } catch (err) {
+    alert(err.message || "프로필 사진을 올리지 못했습니다.");
+  }
+});
+document.getElementById("myAvatarReset")?.addEventListener("click", async () => {
+  if (!currentUser) return;
+  try {
+    await saveProfileImage("");
+  } catch (err) {
+    alert(err.message || "기본 사진으로 바꾸지 못했습니다.");
+  }
+});
 authCancelBtn.addEventListener("click", () => {
   authError.hidden = true;
   authDialog.close();
@@ -1630,7 +2280,11 @@ authForm.addEventListener("submit", async (e) => {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "실패");
-    saveUser({ memberId: data.memberId, nickname: data.nickname || data.memberId });
+    saveUser({
+      memberId: data.memberId,
+      nickname: data.nickname || data.memberId,
+      profileImage: data.profileImage || "",
+    });
     authDialog.close();
   } catch (err) {
     authError.hidden = false;
@@ -1883,6 +2537,22 @@ document.querySelectorAll(".lang-btn").forEach((btn) => {
 
 currentUser = loadStoredUser();
 renderAuthBar();
+if (currentUser?.memberId) {
+  fetch(`/api/profile?memberId=${encodeURIComponent(currentUser.memberId)}`)
+    .then(async (res) => {
+      if (!res.ok) return null;
+      return readJsonResponse(res);
+    })
+    .then((data) => {
+      if (!data?.memberId) return;
+      saveUser({
+        memberId: data.memberId,
+        nickname: data.nickname || currentUser.nickname,
+        profileImage: data.profileImage || "",
+      });
+    })
+    .catch(() => {});
+}
 syncLangButtons();
 applyChromeI18n();
 loadRegions().then(() => loadHiddenGems());

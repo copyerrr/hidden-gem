@@ -429,6 +429,15 @@ body {
   place-items: center;
   font-weight: 800;
   font-size: 0.95rem;
+  overflow: hidden;
+}
+
+.thread-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 999px;
+  display: block;
 }
 
 .thread-main {
@@ -544,12 +553,48 @@ body {
 .my-avatar {
   width: 56px;
   height: 56px;
+  border: 0;
+  padding: 0;
   border-radius: 999px;
   background: linear-gradient(145deg, #fde68a, #f59e0b);
   display: grid;
   place-items: center;
   font-size: 1.35rem;
   font-weight: 800;
+  color: inherit;
+  position: relative;
+  flex-shrink: 0;
+  font-family: inherit;
+}
+
+.my-avatar.editable {
+  cursor: pointer;
+}
+
+.my-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 999px;
+  display: block;
+}
+
+.my-avatar.editable::after {
+  content: "+";
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  width: 1.15rem;
+  height: 1.15rem;
+  border-radius: 999px;
+  background: #111;
+  color: #fff;
+  font-size: 0.85rem;
+  font-weight: 700;
+  display: grid;
+  place-items: center;
+  line-height: 1;
+  box-shadow: 0 0 0 2px #fff;
 }
 
 .my-name {
@@ -562,6 +607,22 @@ body {
   margin: 0.2rem 0 0;
   font-size: 0.8rem;
   color: var(--muted);
+}
+
+.my-avatar-reset {
+  margin: 0.35rem 0 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.my-avatar-reset:hover {
+  color: var(--text);
 }
 
 .my-subtabs {
@@ -990,6 +1051,184 @@ body {
   display: flex;
   flex-direction: column;
   gap: 1.15rem;
+}
+
+.place-transit-status {
+  margin: 0.4rem 0 0;
+  font-size: 0.84rem;
+  color: var(--muted);
+}
+
+.place-transit-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.transit-result {
+  margin: 0.55rem 0 0;
+}
+
+.transit-total {
+  margin: 0 0 0.55rem;
+  font-size: 1.05rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+
+.transit-alts {
+  display: flex;
+  gap: 0.35rem;
+  margin-bottom: 0.7rem;
+}
+
+.transit-alt {
+  flex: 1;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  border-radius: 999px;
+  padding: 0.42rem 0.35rem;
+  font: inherit;
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.transit-alt.active {
+  background: var(--text);
+  color: #fff;
+  border-color: var(--text);
+}
+
+.transit-path {
+  margin: 0;
+  padding: 0;
+  background: none;
+  border: 0;
+}
+
+.transit-timeline {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.transit-walk {
+  margin: 0;
+  padding: 0.1rem 0.15rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.transit-card {
+  background: #f7f7f8;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 0.75rem 0.85rem;
+}
+
+.transit-card-head {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin-bottom: 0.55rem;
+}
+
+.transit-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2rem;
+  padding: 0.18rem 0.45rem;
+  border-radius: 7px;
+  background: #3b82f6;
+  color: #fff;
+  font-size: 0.78rem;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+.transit-mode {
+  font-size: 0.86rem;
+  font-weight: 800;
+}
+
+.transit-min {
+  margin-left: auto;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.transit-io {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.transit-stop {
+  margin: 0;
+  padding-left: 1rem;
+  position: relative;
+  font-size: 0.9rem;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.transit-stop::before {
+  content: "";
+  position: absolute;
+  left: 0.12rem;
+  top: 0.42em;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 2px solid #9ca3af;
+  background: #fff;
+}
+
+.transit-stop.board::before {
+  background: #111;
+  border-color: #111;
+}
+
+.transit-stop-toggle {
+  align-self: flex-start;
+  margin: 0.05rem 0 0.05rem 1rem;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: #6b7280;
+  font: inherit;
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.transit-stop-toggle:hover {
+  color: var(--text);
+}
+
+.transit-stop-list {
+  list-style: none;
+  margin: 0.1rem 0 0.15rem 1rem;
+  padding: 0.2rem 0 0.2rem 0.75rem;
+  border-left: 1px dashed #d1d5db;
+  display: flex;
+  flex-direction: column;
+  gap: 0.18rem;
+}
+
+.transit-stop-list li {
+  font-size: 0.8rem;
+  color: var(--muted);
 }
 
 .place-kicker {

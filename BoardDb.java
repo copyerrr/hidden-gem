@@ -60,6 +60,14 @@ public final class BoardDb {
                     System.err.println("Post.category 확인: " + e.getMessage());
                 }
             }
+            try (Statement st = conn.createStatement()) {
+                st.executeUpdate("ALTER TABLE Member ADD COLUMN profile_image VARCHAR(500)");
+            } catch (SQLException e) {
+                String msg = e.getMessage() == null ? "" : e.getMessage().toLowerCase();
+                if (!(e.getErrorCode() == 1060 || msg.contains("duplicate"))) {
+                    System.err.println("Member.profile_image 확인: " + e.getMessage());
+                }
+            }
             schemaReady = true;
         }
     }
@@ -67,17 +75,14 @@ public final class BoardDb {
     public static Map<String, String> login(String memberId, String password) throws Exception {
         try (Connection conn = open();
              PreparedStatement ps = conn.prepareStatement(
-                     "SELECT member_id, nickname FROM Member WHERE member_id = ? AND password = ?")) {
+                     "SELECT member_id, nickname, profile_image FROM Member WHERE member_id = ? AND password = ?")) {
             ps.setString(1, memberId);
             ps.setString(2, password);
             try (ResultSet rs = ps.executeQuery()) {
                 if (!rs.next()) {
                     return null;
                 }
-                Map<String, String> out = new LinkedHashMap<>();
-                out.put("memberId", rs.getString("member_id"));
-                out.put("nickname", nullToEmpty(rs.getString("nickname")));
-                return out;
+                return memberRow(rs);
             }
         }
     }
@@ -116,13 +121,57 @@ public final class BoardDb {
             Map<String, String> out = new LinkedHashMap<>();
             out.put("memberId", id);
             out.put("nickname", nick);
+            out.put("profileImage", "");
             return out;
         }
     }
 
+    public static Map<String, String> getMember(String memberId) throws Exception {
+        if (memberId == null || memberId.isBlank()) {
+            return null;
+        }
+        try (Connection conn = open();
+             PreparedStatement ps = conn.prepareStatement(
+                     "SELECT member_id, nickname, profile_image FROM Member WHERE member_id = ?")) {
+            ps.setString(1, memberId.trim());
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? memberRow(rs) : null;
+            }
+        }
+    }
+
+    public static Map<String, String> updateProfileImage(String memberId, String profileImage)
+            throws Exception {
+        if (memberId == null || memberId.isBlank()) {
+            throw new IllegalArgumentException("로그인이 필요합니다.");
+        }
+        String url = profileImage == null ? "" : profileImage.trim();
+        if (!url.isEmpty() && !url.startsWith("/uploads/")) {
+            throw new IllegalArgumentException("잘못된 이미지 경로입니다.");
+        }
+        try (Connection conn = open();
+             PreparedStatement ps = conn.prepareStatement(
+                     "UPDATE Member SET profile_image = ? WHERE member_id = ?")) {
+            ps.setString(1, url.isEmpty() ? null : url);
+            ps.setString(2, memberId.trim());
+            if (ps.executeUpdate() == 0) {
+                throw new IllegalArgumentException("회원을 찾을 수 없습니다.");
+            }
+        }
+        return getMember(memberId);
+    }
+
+    private static Map<String, String> memberRow(ResultSet rs) throws SQLException {
+        Map<String, String> out = new LinkedHashMap<>();
+        out.put("memberId", rs.getString("member_id"));
+        out.put("nickname", nullToEmpty(rs.getString("nickname")));
+        out.put("profileImage", nullToEmpty(rs.getString("profile_image")));
+        return out;
+    }
+
     private static final String POST_SELECT = """
             SELECT p.post_id, p.member_id, p.content, p.reg_date, p.category,
-                   m.nickname,
+                   m.nickname, m.profile_image,
                    l.location_id, l.title AS location_title, l.address, l.image_url,
                    (SELECT COUNT(*) FROM Recommendation r WHERE r.post_id = p.post_id) AS recommend_count,
                    (SELECT COUNT(*) FROM Reply rp WHERE rp.post_id = p.post_id) AS reply_count
@@ -515,6 +564,7 @@ public final class BoardDb {
         row.put("postId", rs.getLong("post_id"));
         row.put("memberId", rs.getString("member_id"));
         row.put("nickname", nullToEmpty(rs.getString("nickname")));
+        row.put("profileImage", nullToEmpty(rs.getString("profile_image")));
         row.put("content", nullToEmpty(rs.getString("content")));
         row.put("category", normalizeCategory(rs.getString("category")));
         row.put("regDate", formatRegDate(rs, "reg_date"));

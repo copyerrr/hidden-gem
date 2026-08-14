@@ -4,3 +4,10 @@ db.username=min
 db.password=YOUR_PASSWORD_HERE
 # DeepL (Free 키는 :fx 접미사). 없으면 번역 API 비활성
 deepl.api.key=YOUR_DEEPL_KEY_HERE
+# 카카오맵 JavaScript 키 (브라우저용, 웹 도메인 등록 필요)
+kakao.js.key=YOUR_KAKAO_JS_KEY_HERE
+# 네이버 클라우드 Maps (Client ID / Client Secret)
+naver.client.id=YOUR_NAVER_CLIENT_ID
+naver.client.secret=YOUR_NAVER_CLIENT_SECRET
+# ODsay 대중교통 (브라우저에서 직접 호출, GPS는 우리 서버로 안 보냄)
+odsay.api.key=YOUR_ODSAY_API_KEY

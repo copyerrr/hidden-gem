@@ -116,10 +116,12 @@
     <!-- 마이페이지 -->
     <section id="panel-my" class="panel" role="tabpanel" hidden>
       <div class="my-header">
-        <div class="my-avatar" id="myAvatar" aria-hidden="true">?</div>
+        <button type="button" class="my-avatar" id="myAvatar" aria-label="프로필 사진">?</button>
+        <input id="myAvatarInput" type="file" accept="image/*" hidden>
         <div class="my-info">
           <p class="my-name" id="myName">게스트</p>
           <p class="my-sub" id="mySub">로그인하면 내 글·추천 목록을 볼 수 있어요</p>
+          <button type="button" class="my-avatar-reset" id="myAvatarReset" hidden>기본 사진으로</button>
         </div>
       </div>
       <div class="my-subtabs" role="tablist">

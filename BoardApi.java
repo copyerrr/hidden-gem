@@ -67,6 +67,34 @@ public final class BoardApi {
         }
     }
 
+    public static void handleProfile(HttpExchange ex) throws IOException {
+        try {
+            if ("GET".equalsIgnoreCase(ex.getRequestMethod())) {
+                String memberId = query(ex.getRequestURI()).getOrDefault("memberId", "");
+                Map<String, String> user = BoardDb.getMember(memberId);
+                if (user == null) {
+                    json(ex, 404, error("회원을 찾을 수 없습니다."));
+                    return;
+                }
+                json(ex, 200, userJson(user));
+                return;
+            }
+            if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) {
+                json(ex, 405, error("GET or POST only"));
+                return;
+            }
+            Map<String, String> body = parseJson(readBody(ex));
+            Map<String, String> user = BoardDb.updateProfileImage(
+                    body.getOrDefault("memberId", ""),
+                    body.getOrDefault("profileImage", ""));
+            json(ex, 200, userJson(user));
+        } catch (IllegalArgumentException e) {
+            json(ex, 400, error(e.getMessage()));
+        } catch (Exception e) {
+            json(ex, 500, error(e.getMessage()));
+        }
+    }
+
     /** POST { texts: string[], targetLang?: "EN"|"KO" } → { translations: string[] } */
     public static void handleTranslate(HttpExchange ex) throws IOException {
         if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) {
@@ -395,6 +423,7 @@ public final class BoardApi {
         return "{"
                 + "\"memberId\":" + q(user.get("memberId"))
                 + ",\"nickname\":" + q(user.get("nickname"))
+                + ",\"profileImage\":" + q(user.get("profileImage"))
                 + "}";
     }
 
@@ -405,6 +434,7 @@ public final class BoardApi {
                 .append("\"postId\":").append(post.get("postId"))
                 .append(",\"memberId\":").append(q(str(post.get("memberId"))))
                 .append(",\"nickname\":").append(q(str(post.get("nickname"))))
+                .append(",\"profileImage\":").append(q(str(post.get("profileImage"))))
                 .append(",\"content\":").append(q(str(post.get("content"))))
                 .append(",\"category\":").append(q(str(post.get("category"))))
                 .append(",\"regDate\":").append(q(str(post.get("regDate"))))

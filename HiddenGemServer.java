@@ -19,6 +19,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Properties;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.ExecutorService;
@@ -120,8 +121,10 @@ public class HiddenGemServer {
         server.createContext("/api/thumbnails", HiddenGemServer::handleThumbnails);
         server.createContext("/api/place-detail", HiddenGemServer::handlePlaceDetail);
         server.createContext("/api/regions", HiddenGemServer::handleRegions);
+        server.createContext("/api/config", HiddenGemServer::handlePublicConfig);
         server.createContext("/api/login", BoardApi::handleLogin);
         server.createContext("/api/register", BoardApi::handleRegister);
+        server.createContext("/api/profile", BoardApi::handleProfile);
         server.createContext("/api/translate", BoardApi::handleTranslate);
         server.createContext("/api/upload", BoardApi::handleUpload);
         server.createContext("/uploads", BoardApi::handleUploads);
@@ -159,6 +162,41 @@ public class HiddenGemServer {
         bg.shutdown();
     }
 
+    /** 브라우저용 공개 키만. GPS 좌표는 받지 않음. */
+    private static void handlePublicConfig(HttpExchange ex) throws IOException {
+        if (!"GET".equalsIgnoreCase(ex.getRequestMethod())) {
+            respond(ex, 405, "application/json; charset=utf-8", jsonError("GET only").getBytes(StandardCharsets.UTF_8));
+            return;
+        }
+        String kakaoJs = readProp("kakao.js.key", System.getenv("KAKAO_JS_KEY"));
+        String odsay = readProp("odsay.api.key", System.getenv("ODSAY_API_KEY"));
+        String body = "{\"kakaoJsKey\":" + q(kakaoJs == null ? "" : kakaoJs.trim())
+                + ",\"odsayApiKey\":" + q(odsay == null ? "" : odsay.trim()) + "}";
+        respond(ex, 200, "application/json; charset=utf-8", body.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static String readProp(String key, String envFallback) {
+        try {
+            Path p = Path.of("db.properties");
+            if (Files.isRegularFile(p)) {
+                Properties props = new Properties();
+                try (InputStream in = Files.newInputStream(p)) {
+                    props.load(in);
+                }
+                String v = props.getProperty(key);
+                if (v != null && !v.isBlank()) {
+                    return v.trim();
+                }
+            }
+        } catch (Exception ignored) {
+            // fall through
+        }
+        if (envFallback != null && !envFallback.isBlank()) {
+            return envFallback.trim();
+        }
+        return "";
+    }
+
     private static void handleStatic(HttpExchange ex) throws IOException {
         String path = ex.getRequestURI().getPath();
         if ("/".equals(path)) {
@@ -166,7 +204,12 @@ public class HiddenGemServer {
         }
         Path file = WEB_ROOT.resolve(path.replaceFirst("^/", "")).normalize();
         if (!file.startsWith(WEB_ROOT) || !Files.isRegularFile(file)) {
-            respond(ex, 404, "text/plain; charset=utf-8", "Not Found".getBytes(StandardCharsets.UTF_8));
+            if (path.startsWith("/api/")) {
+                respond(ex, 404, "application/json; charset=utf-8",
+                        jsonError("Not Found").getBytes(StandardCharsets.UTF_8));
+            } else {
+                respond(ex, 404, "text/plain; charset=utf-8", "Not Found".getBytes(StandardCharsets.UTF_8));
+            }
             return;
         }
         String ct = contentType(file.getFileName().toString());
