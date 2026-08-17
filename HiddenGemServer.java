@@ -1476,10 +1476,7 @@ public class HiddenGemServer {
 
     private static void markKorApiLimitedIfNeeded(String code, String reason, String message) {
         String msg = message == null ? "" : message.toUpperCase();
-        if ("22".equals(reason)
-                || msg.contains("LIMITED_NUMBER_OF_SERVICE_REQUESTS")
-                || msg.contains("한도")
-                || msg.contains("초과")) {
+        if ("22".equals(reason) || msg.contains("LIMITED_NUMBER_OF_SERVICE_REQUESTS")) {
             KOR_API_LIMITED.set(true);
         }
     }
@@ -1685,9 +1682,25 @@ public class HiddenGemServer {
         String body = readStream(is);
         conn.disconnect();
         if (code < 200 || code > 299) {
+            markKorApiLimitedFromHttp(code, body);
             throw new IllegalStateException("HTTP " + code + (body.isBlank() ? "" : ": " + body.substring(0, Math.min(120, body.length()))));
         }
         return body;
+    }
+
+    /** HTTP 429 등 — XML resultCode를 보기 전에 끊기는 한도 초과 응답 처리 */
+    private static void markKorApiLimitedFromHttp(int httpCode, String body) {
+        if (httpCode == 429) {
+            KOR_API_LIMITED.set(true);
+            return;
+        }
+        String raw = body == null ? "" : body;
+        String upper = raw.toUpperCase();
+        if (upper.contains("LIMITED_NUMBER_OF_SERVICE_REQUESTS")
+                || raw.contains("<returnReasonCode>22</returnReasonCode>")
+                || raw.contains("returnReasonCode>22<")) {
+            KOR_API_LIMITED.set(true);
+        }
     }
 
     private static String readStream(InputStream is) throws IOException {

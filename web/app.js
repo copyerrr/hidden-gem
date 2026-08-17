@@ -582,7 +582,7 @@ async function loadHiddenGems() {
       uiLang === "en" ? "Loading AI picks" : "AI 계산중",
       "info"
     );
-    const thumbMeta = await loadThumbnails(gems);
+    await loadThumbnails(gems);
     await prefetchPlaceDetails(gems);
 
     const showLimit = Number(DEFAULT_LIMIT) || 30;
@@ -592,16 +592,10 @@ async function loadHiddenGems() {
       return !!(detail && detail.found === true);
     });
 
-    let apiLimited =
-      !!(thumbMeta && thumbMeta.apiLimited) ||
-      [...placeDetailCache.values()].some((d) => d && d.apiLimited);
-
     if (enriched.length) {
       gems = enriched.length > showLimit ? enriched.slice(0, showLimit) : enriched;
-    } else if (apiLimited || gems.length) {
-      // 한도 초과·API 실패 시 빈 화면 대신 통계 목록이라도 표시
+    } else if (gems.length) {
       gems = gems.length > showLimit ? gems.slice(0, showLimit) : gems;
-      apiLimited = true;
     } else {
       gems = [];
     }
@@ -617,17 +611,7 @@ async function loadHiddenGems() {
         console.warn(err);
       }
     }
-    if (apiLimited && aiGemsPool.length && !enriched.length) {
-      showStatus(
-        statusEl,
-        uiLang === "en"
-          ? "Tour API daily quota exceeded — showing names/stats only. Photos return tomorrow (or with an upgraded key)."
-          : "관광공사 API 일일 호출 한도 초과 — 이름·통계만 표시합니다. 사진·상세는 내일(또는 운영계정)에 다시 불러올 수 있습니다.",
-        "error"
-      );
-    } else {
-      hideStatus(statusEl);
-    }
+    hideStatus(statusEl);
     renderGems(currentGems);
     if (!currentGems.length) {
       resultsEl.innerHTML = "";
